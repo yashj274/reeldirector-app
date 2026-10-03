@@ -1,0 +1,209 @@
+{
+  "app_name": "ReelDirector AI",
+  "personality": "6 Glass / Luxe",
+  "personality_one_liner": "A cinematic, expensive, and dark-themed creator tool that feels like a professional film set in your pocket.",
+  "color": {
+    "surface": "#0A0B0E",
+    "onSurface": "#F2F3F7",
+    "surfaceSecondary": "#14161C",
+    "onSurfaceSecondary": "#9CA3AF",
+    "surfaceTertiary": "#1F222B",
+    "onSurfaceTertiary": "#8E96A4",
+    "surfaceInverse": "#F2F3F7",
+    "onSurfaceInverse": "#0A0B0E",
+    "brand": "#E0115F",
+    "brandPrimary": "#E0115F",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#B30E4C",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#3E0F21",
+    "onBrandTertiary": "#FFB3CD",
+    "success": "#10B981",
+    "onSuccess": "#FFFFFF",
+    "warning": "#F59E0B",
+    "onWarning": "#1F2937",
+    "error": "#EF4444",
+    "onError": "#FFFFFF",
+    "info": "#3B82F6",
+    "onInfo": "#FFFFFF",
+    "border": "#272A35",
+    "borderStrong": "#373C4B",
+    "divider": "#1F222B"
+  },
+  "typography": {
+    "displayFontFamily": "Fraunces",
+    "textFontFamily": "Satoshi",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous cinematic spacing for layout, tight utilitarian spacing for camera UI overlays.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": 0,
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": true,
+    "do's": [
+      "Use heavy glass blur for bottom tab bar, sticky headers, floating camera controls, and bottom sheets.",
+      "Pair blur with a translucent tinted base (≥75% of surface) underneath to guarantee foreground readability.",
+      "Use glass for premium feature cards sitting on top of cinematic imagery."
+    ],
+    "dont's": [
+      "Never blur body text regions, form fields, or the entire screen.",
+      "Do not use glass if the foreground text is illegible against the background image."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Splash",
+      "purpose": "A cinematic launch moment setting the premium tone.",
+      "states": {
+        "loading": "A glowing red recording dot pulsing in the center.",
+        "empty": "N/A",
+        "error": "N/A"
+      },
+      "layout": "Full-bleed background image with heavy top-to-bottom dark gradient scrim. Brand wordmark in Fraunces positioned dead center. Pulsing recording dot indicating loading."
+    },
+    {
+      "name": "Auth",
+      "purpose": "Secure entry point into the creator tool.",
+      "states": {
+        "loading": "Glassmorphic spinner over form.",
+        "empty": "N/A",
+        "error": "Glassy bottom sheet toast with error message."
+      },
+      "layout": "Cinematic background with dark blur overlay. Inputs use surfaceTertiary with no borders, only a borderStrong on focus. Primary button is solid brandPrimary."
+    },
+    {
+      "name": "Dashboard",
+      "purpose": "Command center for projects and cinematic templates.",
+      "states": {
+        "loading": "Skeleton cards with soft pulsing opacity.",
+        "empty": "Glassy card suggesting 'Start your first masterpiece'.",
+        "error": "Retry state with a blurred backdrop."
+      },
+      "layout": "Header with 'ReelDirector' wordmark. A horizontal scroll of premium Templates (image background + bottom heavy scrim + title). Below, a vertical list of Recent Projects using 2-col grid. Floating Action Button (glass + brand tint) for quick new project."
+    },
+    {
+      "name": "Project Creation (AI Questionnaire)",
+      "purpose": "Gathering intent before shooting.",
+      "states": {
+        "loading": "Subtle loading spinner while AI generates storyboard.",
+        "empty": "N/A",
+        "error": "Validation error text below inputs."
+      },
+      "layout": "A stacked, single-column conversational form. Large text inputs. Progress indicated by a segmented bar. 'Generate Storyboard' sticky button at bottom."
+    },
+    {
+      "name": "AI Director Camera",
+      "purpose": "Live viewfinder with AR overlays guiding the user's shots.",
+      "states": {
+        "loading": "Calibrating camera lens...",
+        "empty": "N/A",
+        "error": "Camera permission denied message with CTA."
+      },
+      "layout": "Full-screen camera view. Utilitarian layout: Safe-area margins hold translucent glass pills for AI instructions (e.g., 'Pan Left Slowly', 'Hold'). Center AR frames for subject tracking. Large glowing record button floating at the bottom with a timer. High contrast is critical."
+    },
+    {
+      "name": "Storyboard & Clip Review",
+      "purpose": "Reviewing shot quality and AI scoring before final edit.",
+      "states": {
+        "loading": "Processing video clips...",
+        "empty": "No clips recorded for this scene.",
+        "error": "Failed to analyze clip."
+      },
+      "layout": "Horizontal timeline of clips at the top. Main area shows video player. Bottom sheet contains AI Quality Analysis scores (Lighting, Stability, Framing) using brandPrimary colored progress bars."
+    },
+    {
+      "name": "Export & Preview",
+      "purpose": "Final render and sharing.",
+      "states": {
+        "loading": "Cinematic progress ring showing AI Rendering %.",
+        "empty": "N/A",
+        "error": "Render failed. Retry."
+      },
+      "layout": "Video playing on loop in upper half. Bottom half uses a glassmorphic sheet showing Export options (Aspect Ratios, Resolution). Huge sticky 'Export to Camera Roll' CTA."
+    }
+  ],
+  "images": {
+    "splash_bg": {
+      "url": "https://images.pexels.com/photos/13327382/pexels-photo-13327382.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Dramatic studio lighting with female subject"
+    },
+    "template_wedding": {
+      "url": "https://images.pexels.com/photos/33419097/pexels-photo-33419097.jpeg",
+      "alt": "Event photographer with gimbal capturing dynamic footage outdoors"
+    },
+    "template_travel": {
+      "url": "https://images.unsplash.com/photo-1534196213718-bd643e406be4",
+      "alt": "Drone flying over a landscape"
+    },
+    "template_food": {
+      "url": "https://images.unsplash.com/photo-1623594629187-2a68392cbab9?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1NzZ8MHwxfHNlYXJjaHwxfHxjb29raW5nJTIwZm9vZCUyMGNpbmVtYXRpY3xlbnwwfHx8fDE3ODI2NDg4MjR8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Cinematic macro shot of food preparation"
+    },
+    "template_fashion": {
+      "url": "https://images.unsplash.com/photo-1664076458686-3449062080ac?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MjJ8MHwxfHNlYXJjaHw0fHxjaW5lbWF0aWMlMjBmYXNoaW9uJTIwZWRpdG9yaWFsJTIwbW9kZWx8ZW58MHx8fHwxNzgyMDUyODM4fDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Editorial fashion model posing"
+    },
+    "template_gym": {
+      "url": "https://images.unsplash.com/photo-1550345332-09e3ac987658",
+      "alt": "Low key lighting gym workout shot"
+    },
+    "template_real_estate": {
+      "url": "https://images.pexels.com/photos/33529500/pexels-photo-33529500.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Luxurious spacious living room interior"
+    },
+    "template_product": {
+      "url": "https://images.unsplash.com/photo-1761701390293-27a1d3fa9df5",
+      "alt": "Vintage camera in a cinematic studio setup"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the Glass / Luxe DARK theme. The app must feel like a premium, cinematic film production tool (think Arri or RED camera UIs combined with Apple's polish).",
+    "DO NOT USE ANY BLUES OR PURPLES. The color palette relies on deep Charcoal (`#0A0B0E`) and a cinematic Ruby/Crimson (`#E0115F`) for recording and primary actions.",
+    "For the AI Director Camera screen, prioritize high contrast. Overlays (instructions, arrows, safe areas) must use solid glass or pure white to remain highly legible over live camera feeds.",
+    "Whenever text is overlaid on image cards (like the Templates on the Dashboard), you MUST use a vertical linear-gradient scrim (top-to-bottom, transparent to ≥70% surfaceInverse) to guarantee WCAG contrast.",
+    "Use `Fraunces` for large display headings to give it a classic cinema poster feel, and `Satoshi` for all UI text, labels, and camera UIs.",
+    "Keep empty states visually rich with relevant iconography or abstract blurred graphics behind the text. A flat black screen is unacceptable.",
+    "Haptics are crucial for a camera app. Trigger haptics when starting/stopping recording, when the AI guides the user to a correct position, and when a clip finishes rendering."
+  ],
+  "haptics": {
+    "record_start": "impactHeavy",
+    "record_stop": "impactMedium",
+    "ai_alignment_success": "notificationSuccess",
+    "button_press": "impactLight",
+    "tab_switch": "selection"
+  }
+}
