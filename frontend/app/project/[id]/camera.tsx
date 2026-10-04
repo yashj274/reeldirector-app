@@ -84,6 +84,7 @@ export default function DirectorCamera() {
   const recordingPromise = useRef<Promise<RecordedVideo | undefined> | null>(null);
   const webVideoRef = useRef<HTMLVideoElement | null>(null);
   const webStreamRef = useRef<MediaStream | null>(null);
+  const webAudioStreamRef = useRef<MediaStream | null>(null);
   const webRecorderRef = useRef<MediaRecorder | null>(null);
   const webChunksRef = useRef<Blob[]>([]);
   const stoppingRecording = useRef(false);
@@ -126,7 +127,7 @@ export default function DirectorCamera() {
         facingMode: { ideal: preferredFacing === 'back' ? 'environment' : 'user' },
         width: { ideal: 1280 }, height: { ideal: 720 },
       },
-      audio: true,
+      audio: false,
     });
     const previousStream = webStreamRef.current;
     webStreamRef.current = nextStream;
@@ -172,11 +173,23 @@ export default function DirectorCamera() {
   useEffect(() => {
     if (Platform.OS !== 'web' || !webStream || !webVideoRef.current) return;
     const video = webVideoRef.current;
+    let disposed = false;
+    const markReady = () => {
+      if (!disposed && video.videoWidth > 0 && video.videoHeight > 0) {
+        setCameraReady(true);
+        setCameraError(null);
+      }
+    };
+    video.addEventListener('loadedmetadata', markReady);
+    video.addEventListener('canplay', markReady);
     video.srcObject = webStream;
-    void video.play().then(() => setCameraReady(true)).catch(() => {
-      setCameraError('The camera preview could not start. Check the browser camera permission and try again.');
+    void video.play().then(markReady).catch(() => {
+      if (!disposed) setCameraError('The camera is open, but this browser blocked its preview. Tap Reopen camera or check camera access in browser settings.');
     });
     return () => {
+      disposed = true;
+      video.removeEventListener('loadedmetadata', markReady);
+      video.removeEventListener('canplay', markReady);
       if (video.srcObject === webStream) video.srcObject = null;
     };
   }, [webStream]);
@@ -185,6 +198,7 @@ export default function DirectorCamera() {
     const recorder = webRecorderRef.current;
     if (recorder && recorder.state !== 'inactive') recorder.stop();
     webStreamRef.current?.getTracks().forEach((track) => track.stop());
+    webAudioStreamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
   const shotObj = project?.storyboard?.[shotIndex];
@@ -283,13 +297,26 @@ export default function DirectorCamera() {
     setCameraError(null);
     if (Platform.OS === 'web') {
       try {
-        const stream = webStreamRef.current;
-        if (!stream || !stream.getAudioTracks().length) {
-          throw new Error('Camera and microphone access are needed to record video with sound.');
+        const cameraStream = webStreamRef.current;
+        if (!cameraStream?.getVideoTracks().some((track) => track.readyState === 'live')) {
+          throw new Error('The camera is not ready. Reopen the live camera and try again.');
         }
         if (typeof MediaRecorder === 'undefined') {
           throw new Error('Video recording is not supported by this browser. Try a current version of Safari or Chrome.');
         }
+        // Ask for microphone access only when recording. A microphone denial must
+        // never prevent a user from seeing the camera preview.
+        let audioTracks: MediaStreamTrack[] = [];
+        try {
+          webAudioStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          audioTracks = webAudioStreamRef.current.getAudioTracks();
+        } catch {
+          setCameraError('Microphone access is off. Recording will continue without sound.');
+        }
+        const recordingStream = new MediaStream([
+          ...cameraStream.getVideoTracks(),
+          ...audioTracks,
+        ]);
         const supportedTypes = [
           'video/webm;codecs=vp9,opus',
           'video/webm;codecs=vp8,opus',
@@ -298,7 +325,7 @@ export default function DirectorCamera() {
           'video/mp4',
         ];
         const mimeType = supportedTypes.find((type) => MediaRecorder.isTypeSupported(type));
-        const recorder = new MediaRecorder(stream, {
+        const recorder = new MediaRecorder(recordingStream, {
           ...(mimeType ? { mimeType } : {}),
           videoBitsPerSecond: 2_500_000,
           audioBitsPerSecond: 128_000,
@@ -380,6 +407,8 @@ export default function DirectorCamera() {
     } finally {
       recordingPromise.current = null;
       webRecorderRef.current = null;
+      webAudioStreamRef.current?.getTracks().forEach((track) => track.stop());
+      webAudioStreamRef.current = null;
       stoppingRecording.current = false;
       setRecording(false);
       setAnalyzing(false);
@@ -409,20 +438,29 @@ export default function DirectorCamera() {
     setQuality(null);
   };
 
-  if (Platform.OS !== 'web' && (!permission || !micPermission)) return <View style={styles.root} />;
+  if (Platform.OS !== 'web' && !permission) {
+    return (
+      <View style={[styles.root, styles.center]} testID="camera-permission-loading">
+        <ActivityIndicator color={theme.color.brand} />
+        <Text style={styles.permSub}>Starting camera…</Text>
+      </View>
+    );
+  }
   const needsPermission = Platform.OS === 'web'
     ? !webStream && !quality
-    : !permission?.granted || !micPermission?.granted;
+    : !permission?.granted;
   const webCameraNeedsHttps = Platform.OS === 'web'
     && typeof window !== 'undefined' && !window.isSecureContext;
   if (needsPermission) {
     return (
       <View style={[styles.root, styles.center]} testID="camera-permission-screen">
         <Ionicons name="videocam-outline" size={48} color={theme.color.onSurface2} />
-        <Text style={styles.permTitle}>{t('camera_mic_title')}</Text>
+        <Text style={styles.permTitle}>{Platform.OS === 'web' ? t('camera_mic_title') : 'Camera access needed'}</Text>
         <Text style={styles.permSub}>{webCameraNeedsHttps
           ? t('camera_https_copy')
-          : t('camera_permission_copy')}</Text>
+          : Platform.OS === 'web'
+            ? 'Allow camera access to frame your shot. Microphone access is requested only when you start recording.'
+            : 'Allow camera access to frame and record your shot. Microphone access is requested when recording starts.'}</Text>
         {cameraError && <Text style={styles.cameraError}>{cameraError}</Text>}
         {analyzing && <ActivityIndicator color={theme.color.brand} />}
         <Pressable style={[styles.permBtn, analyzing && { opacity: 0.5 }]} disabled={analyzing} onPress={async () => {
@@ -432,11 +470,10 @@ export default function DirectorCamera() {
               return;
             }
             try { await openWebCamera(facing); }
-            catch (e: any) { setCameraError(e.message || 'Could not open the camera and microphone.'); }
+            catch (e: any) { setCameraError(e.message || 'Could not open the camera. Check browser camera permission and try again.'); }
             return;
           }
           if (!permission?.granted) await requestPermission();
-          if (!micPermission?.granted) await requestMicPermission();
         }} testID="camera-grant-permission">
           <Text style={styles.permBtnText}>{Platform.OS !== 'web'
             ? t('grant_access') : webCameraNeedsHttps ? t('record_or_choose_video') : t('open_live_camera')}</Text>
@@ -476,6 +513,7 @@ export default function DirectorCamera() {
           'aria-label': t('live_camera'),
           style: {
             position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
+            display: 'block', backgroundColor: '#111',
             transform: facing === 'front' ? 'scaleX(-1)' : undefined,
             filter: `brightness(${Math.max(0.5, Math.min(1.5, 1 + brightness))})`,
           },
@@ -498,6 +536,22 @@ export default function DirectorCamera() {
           zoom={zoom}
           enableTorch={flash === 'on' && facing === 'back'}
         />}
+      {!quality && !cameraReady && (Platform.OS !== 'web' || !!webStream) && (
+        <View style={styles.cameraLoadingOverlay} testID="camera-preview-loading">
+          <ActivityIndicator size="large" color={theme.color.brand} />
+          <Text style={styles.cameraLoadingText}>{cameraError || 'Connecting to camera preview…'}</Text>
+          {Platform.OS === 'web' && !!webStream && (
+            <Pressable
+              style={styles.reopenCameraButton}
+              onPress={() => { void openWebCamera(facing).catch((error: any) => setCameraError(error.message || 'Could not reopen the camera.')); }}
+              testID="camera-reopen-preview"
+            >
+              <Ionicons name="refresh" size={16} color="#fff" />
+              <Text style={styles.reopenCameraText}>Reopen camera</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
       {Platform.OS !== 'web' && brightness !== 0 && (
         <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: brightness > 0 ? '#fff' : '#000', opacity: Math.min(0.5, Math.abs(brightness)) }]} />
       )}
@@ -712,6 +766,10 @@ const styles = StyleSheet.create({
   permBtnSecondary: { backgroundColor: theme.color.surface3, borderWidth: 1, borderColor: theme.color.border },
   videoFilePreview: { alignItems: 'center', justifyContent: 'center', backgroundColor: theme.color.surface2, gap: 12 },
   videoFilePreviewText: { color: theme.color.onSurface2, fontSize: 15, fontWeight: '600' },
+  cameraLoadingOverlay: { ...StyleSheet.absoluteFillObject, zIndex: 1, alignItems: 'center', justifyContent: 'center', padding: 28, gap: 12, backgroundColor: 'rgba(0,0,0,0.48)' },
+  cameraLoadingText: { color: '#fff', textAlign: 'center', fontSize: 14, fontWeight: '600' },
+  reopenCameraButton: { minHeight: 40, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 14, borderRadius: theme.radius.md, backgroundColor: theme.color.brand },
+  reopenCameraText: { color: '#fff', fontWeight: '700' },
   gridV: { position: 'absolute', top: 0, bottom: 0, left: '33%', width: 0.5, backgroundColor: 'rgba(255,255,255,0.18)' },
   gridV2: { position: 'absolute', top: 0, bottom: 0, left: '66%', width: 0.5, backgroundColor: 'rgba(255,255,255,0.18)' },
   gridH: { position: 'absolute', left: 0, right: 0, top: '33%', height: 0.5, backgroundColor: 'rgba(255,255,255,0.18)' },

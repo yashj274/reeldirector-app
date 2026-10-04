@@ -36,7 +36,7 @@ export default function ProjectDetail() {
       const result = await api.storyboard(id);
       await load();
       setStoryboardNotice(result?.ai_generated === false
-        ? 'Gemini is busy right now. A duration-matched starter storyboard is ready; you can edit every shot.'
+        ? 'Gemini did not return an AI script. This version is built around your description and available scene scan; you can retry the AI version when the service responds.'
         : '');
     } catch (e: any) {
       console.warn(e);
@@ -84,9 +84,17 @@ export default function ProjectDetail() {
             <Text style={styles.metaSub}>{proj.purpose || t('no_purpose')}</Text>
           </View>
           {(storyboardNotice || proj.storyboard_ai_generated === false) && (
-            <Text style={styles.storyboardNotice} accessibilityRole="alert">
-              {storyboardNotice || 'Gemini was temporarily unavailable. This starter storyboard is ready to edit.'}
-            </Text>
+            <View style={styles.storyboardNoticeBox} accessibilityRole="alert">
+              <Text style={styles.storyboardNotice}>
+                {storyboardNotice || 'Gemini did not return an AI script. This version is built around your description and available scene scan.'}
+              </Text>
+              {(proj.storyboard || []).every((shot: any) => shot.status !== 'captured') && (
+                <Pressable onPress={doStoryboard} disabled={generating} style={styles.retryStoryboard} testID="project-retry-ai-storyboard">
+                  {generating ? <ActivityIndicator size="small" color={theme.color.brand} /> : <Ionicons name="refresh" size={16} color={theme.color.brand} />}
+                  <Text style={styles.retryStoryboardText}>{generating ? t('directing_your_shoot') : 'Retry AI custom script'}</Text>
+                </Pressable>
+              )}
+            </View>
           )}
 
           {/* Storyboard section */}
@@ -216,7 +224,10 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 8, paddingBottom: 12, gap: 12 },
   hdrTitle: { flex: 1, color: theme.color.onSurface, fontSize: 17, fontWeight: '700' },
   metaCard: { padding: 20, borderRadius: theme.radius.lg, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border, marginBottom: 20 },
-  storyboardNotice: { color: theme.color.warning, fontSize: 13, lineHeight: 19, marginTop: -8, marginBottom: 18 },
+  storyboardNoticeBox: { marginTop: -8, marginBottom: 18, padding: 12, borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border, gap: 10 },
+  storyboardNotice: { color: theme.color.onSurface2, fontSize: 13, lineHeight: 19 },
+  retryStoryboard: { minHeight: 38, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 11, borderRadius: theme.radius.md, backgroundColor: theme.color.brandTint },
+  retryStoryboardText: { color: theme.color.brand, fontSize: 13, fontWeight: '700' },
   metaLabel: { color: theme.color.brand, fontSize: 11, fontWeight: '700', letterSpacing: 1.5 },
   metaTitle: { color: theme.color.onSurface, fontSize: 22, fontWeight: '700', marginTop: 8, letterSpacing: -0.5 },
   metaSub: { color: theme.color.onSurface2, marginTop: 6, fontSize: 14 },

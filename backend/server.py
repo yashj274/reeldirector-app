@@ -835,47 +835,112 @@ Return ONLY one JSON object with keys `script` (a concise, coherent 2-4 sentence
 No prose outside the JSON. Keep all script, shot titles, descriptions, narration, captions, and physical directions in the requested language. Be specific to the user's purpose and audience. Infer cultural meaning from clear event names (for example, a mehndi is commonly a South Asian pre-wedding celebration centered on henna art, close family moments, music, and ritual); use that understanding respectfully, adapt details to the supplied scene scan, and never invent people or rituals that the user did not describe or the image does not support. Do not replace the user's event with a generic template."""
 
 
-def fallback_storyboard(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Create a usable, duration-matched storyboard when Gemini is unavailable."""
+def fallback_storyboard(doc: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
+    """Build a purpose-led offline script when Gemini is unavailable.
+
+    This is deliberately grounded in the creator's wording and (when available)
+    the environment scan, instead of substituting a generic shot list.
+    """
     duration = max(1, int(round(float(doc.get("duration_seconds") or 30))))
     count = max(4, min(8, int(math.ceil(duration / 6))))
     shot_duration = round(duration / count, 1)
     durations = [shot_duration] * count
     durations[-1] = round(duration - sum(durations[:-1]), 1)
-    subject = (doc.get("shoot_type") or "your subject").replace("_", " ").strip()
+    title = str(doc.get("title") or "Your video").strip()
+    purpose = str(doc.get("purpose") or title).strip()
+    subject = purpose if len(purpose) <= 92 else purpose[:89].rsplit(" ", 1)[0] + "…"
+    scan = doc.get("scene_map") or {}
+    scan_summary = str(scan.get("summary") or "").strip() if scan.get("ai_generated", True) else ""
+    scan_context = f"Use the scanned setting ({scan_summary}) as the visual anchor. " if scan_summary else "Use only details that are actually visible in the filming environment. "
     mood = (doc.get("mood") or doc.get("style") or "cinematic").strip()
-    blueprints = [
-        ("Opening wide", "Establish the setting before revealing the main subject.", "static", "wide",
-         "Start wide, hold the phone steady, and let the scene breathe."),
-        ("Approach", "Bring the viewer closer to the subject with a measured move.", "dolly_in", "medium",
-         "Take a few slow steps toward the subject while keeping it centered."),
-        ("Detail", "Show one expressive detail that communicates the mood.", "static", "close_up",
-         "Move in close and hold the important detail steady."),
-        ("Reveal", "Finish with a smooth reveal that gives the scene a clear ending.", "pan_right", "wide",
-         "Pan smoothly across the scene and finish on the strongest view."),
-        ("Texture", "Capture a second detail to add texture and rhythm.", "tilt_down", "close_up",
-         "Tilt slowly to reveal a small detail connected to the subject."),
-        ("Movement", "Follow the subject to add motion and energy.", "tracking", "medium",
-         "Move alongside the subject at an even, comfortable pace."),
-        ("Hero frame", "Hold on the clearest, most memorable view of the subject.", "static", "medium",
-         "Frame the subject cleanly and hold still for the full shot."),
-        ("Closing detail", "End on a deliberate detail that completes the story.", "reveal", "close_up",
-         "Ease into the final detail and pause before you stop recording."),
-    ]
+    lower = f"{title} {purpose} {doc.get('shoot_type') or ''}".casefold()
+    if any(word in lower for word in ("mehndi", "mehendi", "henna")):
+        blueprints = [
+            ("The mehndi setting", f"Introduce {subject} with the decorated setting and atmosphere that are actually visible.", "static", "wide", "Begin with a steady wide frame; include only the decor and people present."),
+            ("Henna detail", "If henna is being applied, follow the pattern taking shape; otherwise frame a finished design that is visible.", "dolly_in", "close_up", "Move in slowly toward the visible henna detail and hold focus on the pattern."),
+            ("Personal detail", "Capture a visible detail of clothing, jewelry, hands, or decor that supports this celebration.", "static", "extreme_close_up", "Choose one real detail in the scene, move close, and keep the phone still."),
+            ("A human moment", "If guests are present, capture a natural shared moment; if not, stay with the celebration details in frame.", "tracking", "medium", "Follow a real moment gently; do not ask anyone to pose unless the creator wants that."),
+            ("Celebration texture", "Use the scanned surroundings and the creator's notes to find a second distinctive celebration detail.", "tilt_down", "close_up", "Tilt slowly from the visible setting to one detail that makes this mehndi personal."),
+            ("Closing memory", "End on the most expressive real detail from the mehndi, holding a calm final frame.", "reveal", "medium", "Make a small, smooth reveal and pause on the strongest detail before stopping."),
+            ("Quiet beat", "Add a still moment that lets the henna design and celebration atmosphere register.", "static", "close_up", "Hold a steady close frame on a visible henna or decor detail."),
+            ("Final frame", "Return to the clearest visible part of this celebration to complete its story.", "pan_right", "wide", "Pan gently across the scene and finish on the best-lit real detail."),
+        ]
+    elif any(word in lower for word in ("birthday", "anniversary", "celebration", "party")):
+        blueprints = [
+            ("Set the scene", f"Introduce {subject} through the actual location and decorations in view.", "static", "wide", "Start wide and let the viewer understand the real setting."),
+            ("A detail to remember", "Move to a specific visible decoration, keepsake, or detail named by the creator.", "dolly_in", "close_up", "Approach one visible detail slowly and keep it centered."),
+            ("The people", "If people are present, capture a natural interaction; otherwise stay with the details that are there.", "tracking", "medium", "Follow a genuine moment smoothly without staging one."),
+            ("The highlight", "Give the creator's named highlight its own clear moment, only if it is present in the scene.", "static", "close_up", "Hold steady on the real highlight described for this video."),
+            ("Atmosphere", "Show how the setting feels through a small movement across the visible space.", "pan_left", "wide", "Pan slowly across the actual room or gathering."),
+            ("Closing memory", "End on the strongest visible moment that best expresses this celebration.", "reveal", "medium", "Ease into the strongest real detail and hold for a clean ending."),
+            ("Small detail", "Add a close detail that makes this celebration distinct from a generic party video.", "tilt_down", "extreme_close_up", "Tilt gently toward a detail the creator mentioned or the camera can see."),
+            ("Final frame", "Return to the celebration's main subject for a simple final image.", "static", "wide", "Reframe the main visible subject and hold still."),
+        ]
+    elif any(word in lower for word in ("food", "recipe", "dish", "cooking", "cafe", "restaurant")):
+        blueprints = [
+            ("The setting", f"Introduce {subject} with the real kitchen, table, or dining setting in view.", "static", "wide", "Start with a steady frame of the actual setting."),
+            ("Texture close-up", "Show the most appetizing visible texture or ingredient mentioned by the creator.", "dolly_in", "extreme_close_up", "Move in slowly and hold on a real texture or ingredient."),
+            ("Making moment", "If preparation is happening, follow one clear action; otherwise focus on the finished dish.", "tracking", "medium", "Track one real action smoothly, or hold on the plated food."),
+            ("Final presentation", "Give the finished food or the creator's stated highlight a clean hero frame.", "reveal", "close_up", "Reveal the finished dish with one small, controlled move."),
+            ("Second detail", "Capture another distinct, visible ingredient or serving detail for visual rhythm.", "tilt_down", "close_up", "Tilt gently to one detail that is actually present."),
+            ("Closing frame", "Finish on the finished dish and leave a moment for the viewer to take it in.", "static", "medium", "Center the dish and hold the camera still for the last beat."),
+            ("Atmosphere", "Show the real place and mood around the food without inventing a restaurant or a cook.", "pan_right", "wide", "Pan slowly across the available setting."),
+            ("Last detail", "End with a tight frame on the dish detail the creator most wants viewers to notice.", "dolly_in", "close_up", "Ease into the selected detail and stop moving before the shot ends."),
+        ]
+    elif any(word in lower for word in ("product", "launch", "brand", "shop", "review", "unboxing")):
+        blueprints = [
+            ("Product introduction", f"Introduce {subject} using the actual product and setting available.", "static", "wide", "Start with a clean wide frame that keeps the product recognizable."),
+            ("Signature detail", "Feature one real design detail or feature named by the creator.", "dolly_in", "close_up", "Move in slowly toward the named feature and keep it in focus."),
+            ("In use", "If the product is being used, show that real use; otherwise reveal another visible angle.", "tracking", "medium", "Follow the actual use smoothly, or move around the product a little."),
+            ("Material and finish", "Show the product's visible texture, finish, or packaging without adding claims.", "tilt_down", "extreme_close_up", "Tilt slowly over the real material or finish."),
+            ("Hero view", "Give the product a clear hero frame with the background present in the scan.", "reveal", "medium", "Reveal the product with a small, steady movement."),
+            ("Closing detail", "End on the product feature that best matches the creator's stated goal.", "static", "close_up", "Hold on that real feature long enough to read and recognize it."),
+            ("Alternate angle", "Add one distinct angle so the edit does not repeat the opening composition.", "pan_left", "wide", "Pan gently to a second real angle of the product."),
+            ("Final hero frame", "Return to the product for a simple, upload-ready final image.", "static", "medium", "Center the product and keep the phone still."),
+        ]
+    elif any(word in lower for word in ("travel", "trip", "holiday", "vacation", "visit")):
+        blueprints = [
+            ("Arrive in the scene", f"Introduce {subject} through the place and landscape actually visible.", "static", "wide", "Start wide and hold still so the viewer can read the location."),
+            ("A place detail", "Move in on a visible landmark, texture, sign, or landscape detail relevant to the description.", "dolly_in", "close_up", "Approach one visible detail at a slow, even pace."),
+            ("Move through it", "Show a safe, walkable part of the real environment from the creator's point of view.", "tracking", "medium", "Walk slowly and keep the phone level while following the path."),
+            ("Look around", "Reveal a second angle of the scanned location to make the place feel specific.", "pan_right", "wide", "Pan gently across the real surroundings."),
+            ("Small discovery", "Capture one smaller detail that a quick wide shot would miss.", "tilt_down", "close_up", "Tilt slowly to a detail that is actually in view."),
+            ("Last look", "Finish with the clearest view of the actual place from the creator's description.", "reveal", "wide", "Ease into the strongest real view and hold the final frame."),
+            ("Travel texture", "Add a close-up of a real color, surface, or object from this location.", "static", "extreme_close_up", "Frame a real texture and hold it steady."),
+            ("Closing view", "Return to the main landmark or landscape and leave a quiet ending.", "static", "wide", "Settle on the best visible view and stop moving."),
+        ]
+    else:
+        blueprints = [
+            ("Opening context", f"Introduce {subject} through the real setting and details the creator described.", "static", "wide", "Start wide and show the actual environment before moving closer."),
+            ("Named detail", f"Feature a specific detail connected to {subject}, using only what is visible or described.", "dolly_in", "close_up", "Move slowly toward one real detail from the creator's description."),
+            ("A moment in motion", "Show the main action if it is happening; if not, reveal a second angle of the subject.", "tracking", "medium", "Follow the real action smoothly, or move gently to a new angle."),
+            ("Texture and mood", f"Use framing and light to give {subject} the requested {mood} feel.", "tilt_up", "close_up", "Tilt slowly across a visible detail and keep the phone steady."),
+            ("Second perspective", "Add a different composition that gives this specific idea more context.", "pan_left", "wide", "Pan across the actual setting without adding unseen objects."),
+            ("Closing image", "Finish on the clearest real detail that expresses the creator's intended story.", "reveal", "medium", "Make one gentle reveal and hold the strongest visible image."),
+            ("A quieter beat", "Leave a brief, steady moment on the subject or detail described by the creator.", "static", "close_up", "Hold still on the detail that best represents this video."),
+            ("Final frame", "Return to the main subject for a clean ending that fits the requested platform.", "static", "wide", "Reframe the main subject and hold the phone steady."),
+        ]
+
     shots = []
     for index in range(count):
         title, description, movement, size, direction = blueprints[index]
         shots.append({
             "index": index,
-            "title": f"{title} · {subject.title()}",
-            "description": f"{description} Keep the {mood} feeling consistent.",
+            "title": f"{title} · {subject[:40]}",
+            "description": f"{scan_context}{description} Keep the {mood} feeling consistent.",
             "camera_movement": movement,
             "shot_size": size,
             "duration_seconds": durations[index],
             "direction": direction,
             "status": "pending",
         })
-    return shots
+    scene_line = f"Use the scanned setting, {scan_summary}, as the visual anchor." if scan_summary else "Build from the details the creator actually entered and the real setting on camera."
+    platform = str(doc.get("platform") or "short-form video")
+    audience = str(doc.get("audience") or "its intended audience")
+    script = (f"Tell the story of {purpose} in a {mood} style for {platform}. "
+              f"{scene_line} Move from the real context into the details that make this video personal, "
+              f"then finish on a clear final image for {audience}.")
+    return script, shots
 
 
 @api.post("/projects/{pid}/storyboard")
@@ -928,8 +993,7 @@ Make it cinematic, practical to film on a phone, and tailored to {doc['platform'
     except Exception as e:
         log.warning("storyboard generation unavailable; using local fallback: %s", e)
         ai_generated = False
-        shots = fallback_storyboard(doc)
-        script = f"A {doc.get('mood') or 'cinematic'} story about {doc.get('purpose') or doc.get('title')}, shaped for {doc.get('platform') or 'short video'}."
+        script, shots = fallback_storyboard(doc)
 
     doc.update({"storyboard": shots, "script": script, "status": "storyboarded",
                 "storyboard_ai_generated": ai_generated,
