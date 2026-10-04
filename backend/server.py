@@ -30,7 +30,7 @@ load_dotenv(ROOT_DIR / ".env")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 FAL_KEY = os.environ.get("FAL_KEY", "")
 FAL_VIDEO_MODEL = "fal-ai/wan/v2.7/text-to-video"
 CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY", "")
