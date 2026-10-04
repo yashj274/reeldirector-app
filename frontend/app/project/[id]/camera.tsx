@@ -2,7 +2,7 @@ import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { createElement, useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View,
+  ActivityIndicator, Pressable, StyleSheet, Text, View,
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -19,6 +19,68 @@ import { useT } from '@/src/i18n';
 type Mode = 'video' | 'cinematic';
 type RecordedVideo = { uri?: string; blob?: Blob; mimeType?: string };
 type VideoFrame = { frameBase64: string; durationSeconds: number };
+type ZoomOption = { label: string; factor: number; value?: number; cameraZoom?: number; lens?: string; digitalOnly?: boolean };
+
+const WEB_DIGITAL_ZOOM_OPTIONS: ZoomOption[] = [1, 1.5, 2, 3].map((factor) => ({
+  label: `${factor}x`, factor, digitalOnly: true,
+}));
+
+const ANDROID_ZOOM_OPTIONS: ZoomOption[] = [
+  { label: '1x', factor: 1, cameraZoom: 0 },
+  { label: '2x', factor: 2, cameraZoom: 0.25 },
+  { label: '3x', factor: 3, cameraZoom: 0.5 },
+];
+
+function getWebZoomOptions(track: MediaStreamTrack): ZoomOption[] {
+  try {
+    const getCapabilities = (track as MediaStreamTrack & { getCapabilities?: () => any }).getCapabilities;
+    const range = getCapabilities?.call(track)?.zoom;
+    const min = Number(range?.min);
+    const max = Number(range?.max);
+    if (!Number.isFinite(min) || !Number.isFinite(max) || max < min) {
+      return WEB_DIGITAL_ZOOM_OPTIONS;
+    }
+    const base = min <= 1 && max >= 1 ? 1 : min;
+    return [0.5, 1, 1.5, 2, 3, 4]
+      .map((factor) => ({ factor, value: factor === 1 ? base : base * factor }))
+      .filter(({ value }) => value >= min && value <= max)
+      .map(({ factor, value }) => ({ label: `${factor}x`, factor, value }));
+  } catch {
+    return WEB_DIGITAL_ZOOM_OPTIONS;
+  }
+}
+
+function getIosLensZoomOptions(lenses: string[]): ZoomOption[] {
+  const options = lenses.flatMap((lens) => {
+    const name = lens.toLowerCase().replace(/[_-]/g, ' ');
+    if (name.includes('ultra wide') || name.includes('ultrawide')) return [{ label: '0.5x', factor: 0.5, lens }];
+    if (name.includes('wide')) return [{ label: '1x', factor: 1, lens }];
+    if (name.includes('tele')) return [{ label: 'Tele', factor: 2, lens }];
+    return [];
+  });
+  return options.sort((a, b) => a.factor - b.factor);
+}
+
+function drawCameraFrame(context: CanvasRenderingContext2D, video: HTMLVideoElement, width: number, height: number, zoomFactor: number) {
+  const factor = Math.max(1, zoomFactor);
+  const sourceWidth = video.videoWidth / factor;
+  const sourceHeight = video.videoHeight / factor;
+  context.drawImage(video, (video.videoWidth - sourceWidth) / 2, (video.videoHeight - sourceHeight) / 2,
+    sourceWidth, sourceHeight, 0, 0, width, height);
+}
+
+function movementArrow(movement?: string): string {
+  switch (String(movement || 'static').toLowerCase().trim().replace(/[\s-]+/g, '_')) {
+    case 'pan_left': return 'left';
+    case 'pan_right': case 'tracking': case 'reveal': return 'right';
+    case 'tilt_up': return 'up';
+    case 'tilt_down': return 'down';
+    case 'dolly_in': return 'forward';
+    case 'dolly_out': return 'back';
+    case 'orbit': return 'rotate_cw';
+    default: return 'none';
+  }
+}
 
 function readVideoFrame(file: File): Promise<VideoFrame> {
   return new Promise((resolve, reject) => {
@@ -69,11 +131,6 @@ function readVideoFrame(file: File): Promise<VideoFrame> {
   });
 }
 
-const MODES: { id: Mode; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
-  { id: 'video', label: 'Video', icon: 'videocam' },
-  { id: 'cinematic', label: 'Stabilized', icon: 'film' },
-];
-
 export default function DirectorCamera() {
   const t = useT();
   const { id, shot } = useLocalSearchParams<{ id: string; shot?: string }>();
@@ -85,10 +142,13 @@ export default function DirectorCamera() {
   const webVideoRef = useRef<HTMLVideoElement | null>(null);
   const webStreamRef = useRef<MediaStream | null>(null);
   const webAudioStreamRef = useRef<MediaStream | null>(null);
+  const webDigitalZoomStreamRef = useRef<MediaStream | null>(null);
+  const webDigitalZoomFrameRef = useRef<number | null>(null);
   const webRecorderRef = useRef<MediaRecorder | null>(null);
   const webChunksRef = useRef<Blob[]>([]);
   const stoppingRecording = useRef(false);
   const directionPending = useRef(false);
+  const nativeLensFacing = useRef<'back' | 'front' | null>(null);
 
   const [project, setProject] = useState<any>(null);
   const [shotIndex, setShotIndex] = useState<number>(shot ? parseInt(shot) : 0);
@@ -109,8 +169,15 @@ export default function DirectorCamera() {
   const [facing, setFacing] = useState<'back' | 'front'>('back');
   const [flash, setFlash] = useState<'off' | 'on'>('off');
   const [zoom, setZoom] = useState(0);
+  const [webZoomOptions, setWebZoomOptions] = useState<ZoomOption[]>([]);
+  const [nativeZoomOptions, setNativeZoomOptions] = useState<ZoomOption[]>(Platform.OS === 'ios' ? [] : ANDROID_ZOOM_OPTIONS);
+  const [selectedLens, setSelectedLens] = useState<string | undefined>();
+  const [selectedZoomLabel, setSelectedZoomLabel] = useState('1x');
+  const [webDigitalZoom, setWebDigitalZoom] = useState(1);
+  const [webDigitalZoomActive, setWebDigitalZoomActive] = useState(false);
   const [grid, setGrid] = useState(true);
   const [brightness, setBrightness] = useState(0);
+  const [brightnessOpen, setBrightnessOpen] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -129,6 +196,12 @@ export default function DirectorCamera() {
       },
       audio: false,
     });
+    const videoTrack = nextStream.getVideoTracks()[0];
+    const options = videoTrack ? getWebZoomOptions(videoTrack) : [];
+    setWebZoomOptions(options);
+    setSelectedZoomLabel('1x');
+    setWebDigitalZoom(1);
+    setWebDigitalZoomActive(!!options[0]?.digitalOnly);
     const previousStream = webStreamRef.current;
     webStreamRef.current = nextStream;
     setWebStream(nextStream);
@@ -136,6 +209,22 @@ export default function DirectorCamera() {
     previousStream?.getTracks().forEach((track) => track.stop());
     setFlash('off');
     setCameraError(null);
+  }, [facing]);
+
+  const onNativeCameraReady = useCallback(async () => {
+    setCameraReady(true);
+    if (Platform.OS !== 'ios' || nativeLensFacing.current === facing) return;
+    nativeLensFacing.current = facing;
+    try {
+      const lenses = await cameraRef.current?.getAvailableLensesAsync() || [];
+      const options = getIosLensZoomOptions(lenses);
+      setNativeZoomOptions(options);
+      const defaultLens = options.find((option) => option.label === '1x') || options[0];
+      setSelectedLens(defaultLens?.lens);
+      setSelectedZoomLabel(defaultLens?.label || '1x');
+    } catch {
+      setNativeZoomOptions([]);
+    }
   }, [facing]);
 
   const choosePhoneVideo = useCallback(() => {
@@ -197,11 +286,52 @@ export default function DirectorCamera() {
   useEffect(() => () => {
     const recorder = webRecorderRef.current;
     if (recorder && recorder.state !== 'inactive') recorder.stop();
+    if (webDigitalZoomFrameRef.current !== null) cancelAnimationFrame(webDigitalZoomFrameRef.current);
+    webDigitalZoomStreamRef.current?.getTracks().forEach((track) => track.stop());
     webStreamRef.current?.getTracks().forEach((track) => track.stop());
     webAudioStreamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
   const shotObj = project?.storyboard?.[shotIndex];
+  const zoomOptions = Platform.OS === 'web' ? webZoomOptions : nativeZoomOptions;
+
+  const selectZoom = async (option: ZoomOption) => {
+    setCameraError(null);
+    if (Platform.OS === 'web') {
+      if (option.digitalOnly) {
+        setWebDigitalZoom(option.factor);
+        setWebDigitalZoomActive(true);
+        setSelectedZoomLabel(option.label);
+        setCameraError(null);
+        return;
+      }
+      const track = webStreamRef.current?.getVideoTracks()[0];
+      if (!track || option.value === undefined) return;
+      try {
+        await track.applyConstraints({ advanced: [{ zoom: option.value }] } as any);
+        setWebDigitalZoom(1);
+        setWebDigitalZoomActive(false);
+        setSelectedZoomLabel(option.label);
+      } catch {
+        if (option.factor >= 1) {
+          setWebDigitalZoom(option.factor);
+          setWebDigitalZoomActive(true);
+          setSelectedZoomLabel(option.label);
+          setCameraError(null);
+        } else {
+          setCameraError(t('zoom_unavailable'));
+        }
+      }
+      return;
+    }
+    if (option.lens) {
+      setSelectedLens(option.lens);
+      setZoom(0);
+    } else if (option.cameraZoom !== undefined) {
+      setZoom(option.cameraZoom);
+    }
+    setSelectedZoomLabel(option.label);
+  };
 
   const captureFrame = useCallback(async () => {
     if (Platform.OS === 'web') {
@@ -215,13 +345,14 @@ export default function DirectorCamera() {
       canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
       const context = canvas.getContext('2d');
       if (!context) throw new Error('Could not capture a frame from the camera.');
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      drawCameraFrame(context, video, canvas.width, canvas.height,
+        webDigitalZoomActive ? webDigitalZoom : 1);
       return canvas.toDataURL('image/jpeg', 0.4).split(',', 2)[1];
     }
     const photo = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.4, skipProcessing: true });
     if (!photo?.base64) throw new Error('Could not capture a frame from the camera.');
     return photo.base64;
-  }, []);
+  }, [webDigitalZoom, webDigitalZoomActive]);
 
   // Ask the vision model to direct the current frame, not just the storyboard text.
   const requestDirection = useCallback(async () => {
@@ -295,6 +426,7 @@ export default function DirectorCamera() {
   const startRec = async () => {
     if (recording) return;
     setCameraError(null);
+    setBrightnessOpen(false);
     if (Platform.OS === 'web') {
       try {
         const cameraStream = webStreamRef.current;
@@ -303,6 +435,27 @@ export default function DirectorCamera() {
         }
         if (typeof MediaRecorder === 'undefined') {
           throw new Error('Video recording is not supported by this browser. Try a current version of Safari or Chrome.');
+        }
+        const video = webVideoRef.current;
+        let recordingVideoTracks = cameraStream.getVideoTracks();
+        if (webDigitalZoomActive && webDigitalZoom > 1) {
+          if (!video?.videoWidth || !video.videoHeight || typeof HTMLCanvasElement === 'undefined'
+            || !HTMLCanvasElement.prototype.captureStream) {
+            throw new Error('Digital zoom recording is unavailable in this browser. Choose 1x and try again.');
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const context = canvas.getContext('2d');
+          if (!context) throw new Error('The browser could not prepare the zoomed video.');
+          const drawFrame = () => {
+            drawCameraFrame(context, video, canvas.width, canvas.height, webDigitalZoom);
+            webDigitalZoomFrameRef.current = requestAnimationFrame(drawFrame);
+          };
+          drawFrame();
+          const zoomStream = canvas.captureStream(30);
+          webDigitalZoomStreamRef.current = zoomStream;
+          recordingVideoTracks = zoomStream.getVideoTracks();
         }
         // Ask for microphone access only when recording. A microphone denial must
         // never prevent a user from seeing the camera preview.
@@ -314,7 +467,7 @@ export default function DirectorCamera() {
           setCameraError('Microphone access is off. Recording will continue without sound.');
         }
         const recordingStream = new MediaStream([
-          ...cameraStream.getVideoTracks(),
+          ...recordingVideoTracks,
           ...audioTracks,
         ]);
         const supportedTypes = [
@@ -348,6 +501,12 @@ export default function DirectorCamera() {
         recorder.start(250);
         startTimer();
       } catch (e: any) {
+        if (webDigitalZoomFrameRef.current !== null) cancelAnimationFrame(webDigitalZoomFrameRef.current);
+        webDigitalZoomFrameRef.current = null;
+        webDigitalZoomStreamRef.current?.getTracks().forEach((track) => track.stop());
+        webDigitalZoomStreamRef.current = null;
+        webAudioStreamRef.current?.getTracks().forEach((track) => track.stop());
+        webAudioStreamRef.current = null;
         recordingPromise.current = null;
         setCameraError(e.message || 'Could not start the camera recording.');
       }
@@ -407,6 +566,10 @@ export default function DirectorCamera() {
     } finally {
       recordingPromise.current = null;
       webRecorderRef.current = null;
+      if (webDigitalZoomFrameRef.current !== null) cancelAnimationFrame(webDigitalZoomFrameRef.current);
+      webDigitalZoomFrameRef.current = null;
+      webDigitalZoomStreamRef.current?.getTracks().forEach((track) => track.stop());
+      webDigitalZoomStreamRef.current = null;
       webAudioStreamRef.current?.getTracks().forEach((track) => track.stop());
       webAudioStreamRef.current = null;
       stoppingRecording.current = false;
@@ -498,9 +661,13 @@ export default function DirectorCamera() {
       case 'back': return 'arrow-down-circle';
       case 'rotate_cw':
       case 'rotate_ccw': return 'refresh';
-      default: return 'checkmark-circle';
+      case 'none': return 'pause-circle-outline';
+      default: return 'hand-left-outline';
     }
   };
+  const currentMovement = String(shotObj?.camera_movement || 'static').toLowerCase().trim().replace(/[\s-]+/g, '_');
+  const movementLabel = ['static', 'pan_left', 'pan_right', 'tilt_up', 'tilt_down', 'dolly_in', 'dolly_out', 'tracking', 'orbit', 'reveal', 'handheld'].includes(currentMovement)
+    ? t(`move_${currentMovement}`) : t('hold_camera_steady');
 
   return (
     <View style={styles.root} testID="director-camera-screen">
@@ -514,7 +681,8 @@ export default function DirectorCamera() {
           style: {
             position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
             display: 'block', backgroundColor: '#111',
-            transform: facing === 'front' ? 'scaleX(-1)' : undefined,
+            transform: `${facing === 'front' ? 'scaleX(-1) ' : ''}${webDigitalZoomActive && webDigitalZoom > 1 ? `scale(${webDigitalZoom})` : ''}`.trim() || undefined,
+            transformOrigin: 'center center',
             filter: `brightness(${Math.max(0.5, Math.min(1.5, 1 + brightness))})`,
           },
         }) : (
@@ -530,10 +698,11 @@ export default function DirectorCamera() {
           mute={false}
           videoQuality="1080p"
           videoStabilizationMode={mode === 'cinematic' ? 'cinematic' : 'standard'}
-          onCameraReady={() => setCameraReady(true)}
+          onCameraReady={() => { void onNativeCameraReady(); }}
           facing={facing}
           flash={flash}
           zoom={zoom}
+          selectedLens={selectedLens}
           enableTorch={flash === 'on' && facing === 'back'}
         />}
       {!quality && !cameraReady && (Platform.OS !== 'web' || !!webStream) && (
@@ -582,16 +751,20 @@ export default function DirectorCamera() {
           <View style={styles.instrWrap}>
             <BlurView tint="dark" intensity={50} style={StyleSheet.absoluteFill} />
             {directionBusy ? <ActivityIndicator color={theme.color.brand} /> : (
-              <Ionicons name={arrowIcon(instruction?.arrow || 'none') as any} size={26} color={theme.color.brand} />
+              <Ionicons
+                name={instruction?.ready ? 'checkmark-circle' : arrowIcon(movementArrow(shotObj?.camera_movement)) as any}
+                size={26}
+                color={instruction?.ready ? theme.color.success : theme.color.brand}
+              />
             )}
-            <Text style={styles.instrText} numberOfLines={2}>{instruction?.text || shotObj?.direction || 'Preparing shot direction…'}</Text>
+            <Text style={styles.instrText} numberOfLines={1}>{movementLabel || t('hold_camera_steady')}</Text>
             <Pressable onPress={requestDirection} disabled={directionBusy || recording} testID="camera-refresh-direction">
               <Ionicons name="refresh" size={20} color={directionBusy ? theme.color.onSurface3 : '#fff'} />
             </Pressable>
           </View>
         )}
 
-        {!quality && !!shotObj?.camera_movement && <MovementGuide movement={shotObj.camera_movement} label={t('move_guide')} movementLabel={t(`move_${String(shotObj.camera_movement).toLowerCase().replace(/\s+/g, '_')}`)} />}
+        {!quality && !!shotObj?.camera_movement && <MovementGuide movement={shotObj.camera_movement} label={t('move_guide')} movementLabel={movementLabel} />}
 
         {/* Right-side quick controls */}
         {!quality && !recording && (
@@ -604,17 +777,51 @@ export default function DirectorCamera() {
                 const nextFacing = facing === 'back' ? 'front' : 'back';
                 setFacing(nextFacing);
                 setFlash('off');
+                setSelectedLens(undefined);
+                setSelectedZoomLabel('1x');
+                setZoom(0);
+                nativeLensFacing.current = null;
+                if (Platform.OS !== 'web') setNativeZoomOptions(Platform.OS === 'ios' ? [] : ANDROID_ZOOM_OPTIONS);
                 if (Platform.OS === 'web') void openWebCamera(nextFacing).catch((e: any) => setCameraError(e.message));
               }} testID="cam-flip" />
+            <IconChip icon="sunny-outline" label={t('brightness')} on={brightnessOpen}
+              onPress={() => setBrightnessOpen((value) => !value)} testID="cam-brightness" />
+            {brightnessOpen && (
+              <View style={styles.brightnessPopover}>
+                <View style={styles.brightnessPopoverHeading}>
+                  <Ionicons name="sunny-outline" size={16} color="#fff" />
+                  <Text style={styles.brightnessLabel}>{t('brightness')}</Text>
+                </View>
+                <View style={styles.brightnessAdjustRow}>
+                  <Pressable accessibilityRole="button" accessibilityLabel={t('brightness_down')}
+                    onPress={() => setBrightness((value) => Math.max(-0.5, Math.round((value - 0.05) * 100) / 100))}
+                    style={styles.brightnessButton} testID="cam-brightness-down">
+                    <Ionicons name="remove" size={17} color="#fff" />
+                  </Pressable>
+                  <Text style={styles.brightnessValue}>{Math.round(brightness * 100)}%</Text>
+                  <Pressable accessibilityRole="button" accessibilityLabel={t('brightness_up')}
+                    onPress={() => setBrightness((value) => Math.min(0.5, Math.round((value + 0.05) * 100) / 100))}
+                    style={styles.brightnessButton} testID="cam-brightness-up">
+                    <Ionicons name="add" size={17} color="#fff" />
+                  </Pressable>
+                </View>
+              </View>
+            )}
           </View>
         )}
 
         {/* Zoom slider */}
-        {!quality && !recording && Platform.OS !== 'web' && (
+        {!quality && !recording && cameraReady && zoomOptions.length > 0 && (
           <View style={styles.zoomBar} pointerEvents="box-none">
-            {[0, 0.2, 0.45, 0.8].map((z, index) => (
-              <Pressable key={z} onPress={() => setZoom(z)} style={[styles.zoomChip, zoom === z && styles.zoomChipOn]} testID={`cam-zoom-${z}`}>
-                <Text style={[styles.zoomText, zoom === z && { color: theme.color.brand }]}>{['1x', 'Low', 'Mid', 'High'][index]}</Text>
+            {zoomOptions.map((option) => (
+              <Pressable key={`${option.label}-${option.lens || option.value || option.cameraZoom}`}
+                onPress={() => { void selectZoom(option); }}
+                style={[styles.zoomChip, selectedZoomLabel === option.label && styles.zoomChipOn]}
+                accessibilityRole="button"
+                accessibilityLabel={`${t('zoom')} ${option.label}`}
+                accessibilityState={{ selected: selectedZoomLabel === option.label }}
+                testID={`cam-zoom-${option.label}`}>
+                <Text style={[styles.zoomText, selectedZoomLabel === option.label && { color: theme.color.brand }]}>{option.label}</Text>
               </Pressable>
             ))}
           </View>
@@ -692,28 +899,19 @@ export default function DirectorCamera() {
               </View>
             ) : (
               <>
-                {/* Mode selector */}
-                <View style={styles.brightnessRow}>
-                  <Ionicons name="sunny-outline" size={17} color="#fff" />
-                  <Text style={styles.brightnessLabel}>{t('brightness')}</Text>
-                  <Pressable accessibilityLabel="Decrease brightness" onPress={() => setBrightness((v) => Math.max(-0.5, Math.round((v - 0.05) * 100) / 100))} style={styles.brightnessButton} testID="cam-brightness-down">
-                    <Ionicons name="remove" size={17} color="#fff" />
+                {Platform.OS !== 'web' && (
+                  <Pressable
+                    onPress={() => setMode((current) => current === 'cinematic' ? 'video' : 'cinematic')}
+                    style={[styles.modeChip, mode === 'cinematic' && styles.modeChipOn]}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: mode === 'cinematic' }}
+                    testID="cam-mode-cinematic">
+                    <Ionicons name="film-outline" size={14} color={mode === 'cinematic' ? theme.color.brand : '#fff'} />
+                    <Text style={[styles.modeText, mode === 'cinematic' && { color: theme.color.brand }]}>{t('stabilized_mode')}</Text>
                   </Pressable>
-                  <Text style={styles.brightnessValue}>{Math.round(brightness * 100)}%</Text>
-                  <Pressable accessibilityLabel="Increase brightness" onPress={() => setBrightness((v) => Math.min(0.5, Math.round((v + 0.05) * 100) / 100))} style={styles.brightnessButton} testID="cam-brightness-up">
-                    <Ionicons name="add" size={17} color="#fff" />
-                  </Pressable>
-                </View>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, gap: 8 }} style={{ maxHeight: 40 }}>
-                  {MODES.filter((m) => Platform.OS !== 'web' || m.id === 'video').map((m) => (
-                    <Pressable key={m.id} onPress={() => setMode(m.id)} style={[styles.modeChip, mode === m.id && styles.modeChipOn]} testID={`cam-mode-${m.id}`}>
-                      <Ionicons name={m.icon} size={13} color={mode === m.id ? theme.color.brand : '#fff'} />
-                      <Text style={[styles.modeText, mode === m.id && { color: theme.color.brand }]}>{t(m.id === 'video' ? 'video_mode' : 'stabilized_mode')}</Text>
-                    </Pressable>
-                  ))}
-                </ScrollView>
+                )}
 
-                <Text style={styles.timer}>{recording ? `${recSeconds.toFixed(1)}s / ${targetDur.toFixed(1)}s` : `${t(mode === 'video' ? 'video_mode' : 'stabilized_mode')}  ·  ${targetDur.toFixed(1)}s`}</Text>
+                <Text style={styles.timer}>{recording ? `${recSeconds.toFixed(1)}s / ${targetDur.toFixed(1)}s` : `${targetDur.toFixed(1)}s`}</Text>
                 {cameraError && <Text style={styles.cameraError}>{cameraError}</Text>}
                 <Pressable
                   onPress={recording ? stopRec : startRec}
@@ -749,7 +947,8 @@ function QSlot({ label, v }: { label: string; v: number }) {
 
 function IconChip({ icon, on, onPress, testID, label }: { icon: keyof typeof Ionicons.glyphMap; on: boolean; onPress: () => void; testID: string; label?: string }) {
   return (
-    <Pressable style={[styles.iconChip, on && styles.iconChipOn]} onPress={onPress} testID={testID} accessibilityLabel={label}>
+    <Pressable style={[styles.iconChip, on && styles.iconChipOn]} onPress={onPress} testID={testID}
+      accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: on }}>
       <BlurView tint="dark" intensity={40} style={StyleSheet.absoluteFill} />
       <Ionicons name={icon} size={18} color={on ? theme.color.brand : '#fff'} />
     </Pressable>
@@ -811,15 +1010,21 @@ const styles = StyleSheet.create({
   ghostText: { color: '#fff', fontWeight: '700' },
   primary: { flex: 1.4, height: 48, borderRadius: theme.radius.md, backgroundColor: theme.color.brand, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   primaryText: { color: '#fff', fontWeight: '700' },
-  sideCol: { position: 'absolute', right: 12, top: 120, gap: 10 },
+  sideCol: { position: 'absolute', right: 12, top: 120, gap: 10, zIndex: 4 },
   iconChip: { width: 40, height: 40, borderRadius: 20, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
   iconChipOn: { borderWidth: 1, borderColor: theme.color.brand },
-  zoomBar: { position: 'absolute', bottom: 220, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 8 },
-  zoomChip: { paddingHorizontal: 12, height: 32, borderRadius: theme.radius.pill, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' },
+  brightnessPopover: {
+    position: 'absolute', right: 50, top: 150, minWidth: 148, borderRadius: 14,
+    backgroundColor: 'rgba(12,13,17,0.92)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.16)',
+    padding: 10, zIndex: 5,
+  },
+  brightnessPopoverHeading: { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 8 },
+  brightnessAdjustRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  zoomBar: { position: 'absolute', bottom: 260, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 6, zIndex: 3 },
+  zoomChip: { minWidth: 40, paddingHorizontal: 10, height: 34, borderRadius: theme.radius.pill, backgroundColor: 'rgba(0,0,0,0.72)', alignItems: 'center', justifyContent: 'center' },
   zoomChipOn: { backgroundColor: theme.color.brandTint, borderWidth: 1, borderColor: theme.color.brand },
   zoomText: { color: '#fff', fontWeight: '700', fontSize: 12 },
-  brightnessRow: { minHeight: 34, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, paddingHorizontal: 12, borderRadius: theme.radius.pill, backgroundColor: 'rgba(0,0,0,0.58)' },
-  brightnessLabel: { color: '#fff', fontSize: 12, fontWeight: '700', marginRight: 4 },
+  brightnessLabel: { color: '#fff', fontSize: 12, fontWeight: '700' },
   brightnessButton: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.16)' },
   brightnessValue: { color: '#fff', minWidth: 36, textAlign: 'center', fontSize: 12, fontWeight: '700' },
   modeChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, height: 32, borderRadius: theme.radius.pill, backgroundColor: 'rgba(0,0,0,0.55)', flexShrink: 0 },
