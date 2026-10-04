@@ -88,12 +88,11 @@ export default function ProjectDetail() {
               <Text style={styles.storyboardNotice}>
                 {storyboardNotice || 'Gemini did not return an AI script. This version is built around your description and available scene scan.'}
               </Text>
-              {(proj.storyboard || []).every((shot: any) => shot.status !== 'captured') && (
-                <Pressable onPress={doStoryboard} disabled={generating} style={styles.retryStoryboard} testID="project-retry-ai-storyboard">
-                  {generating ? <ActivityIndicator size="small" color={theme.color.brand} /> : <Ionicons name="refresh" size={16} color={theme.color.brand} />}
-                  <Text style={styles.retryStoryboardText}>{generating ? t('directing_your_shoot') : 'Retry AI custom script'}</Text>
-                </Pressable>
-              )}
+              {captured > 0 && <Text style={styles.retryStoryboardHelp}>Your {captured} recorded {captured === 1 ? 'clip stays' : 'clips stay'} saved and linked by shot number. Review them against the refreshed shot list.</Text>}
+              <Pressable onPress={doStoryboard} disabled={generating} style={styles.retryStoryboard} testID="project-retry-ai-storyboard">
+                {generating ? <ActivityIndicator size="small" color={theme.color.brand} /> : <Ionicons name="refresh" size={16} color={theme.color.brand} />}
+                <Text style={styles.retryStoryboardText}>{generating ? t('directing_your_shoot') : 'Retry AI custom script'}</Text>
+              </Pressable>
             </View>
           )}
 
@@ -226,6 +225,7 @@ const styles = StyleSheet.create({
   metaCard: { padding: 20, borderRadius: theme.radius.lg, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border, marginBottom: 20 },
   storyboardNoticeBox: { marginTop: -8, marginBottom: 18, padding: 12, borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border, gap: 10 },
   storyboardNotice: { color: theme.color.onSurface2, fontSize: 13, lineHeight: 19 },
+  retryStoryboardHelp: { color: theme.color.onSurface3, fontSize: 12, lineHeight: 17 },
   retryStoryboard: { minHeight: 38, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 11, borderRadius: theme.radius.md, backgroundColor: theme.color.brandTint },
   retryStoryboardText: { color: theme.color.brand, fontSize: 13, fontWeight: '700' },
   metaLabel: { color: theme.color.brand, fontSize: 11, fontWeight: '700', letterSpacing: 1.5 },

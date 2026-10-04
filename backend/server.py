@@ -987,13 +987,20 @@ Make it cinematic, practical to film on a phone, and tailored to {doc['platform'
             shots = response_data
         if not isinstance(shots, list) or not shots:
             raise ValueError("bad storyboard")
-        for i, s in enumerate(shots):
-            s["index"] = i
-            s.setdefault("status", "pending")
     except Exception as e:
         log.warning("storyboard generation unavailable; using local fallback: %s", e)
         ai_generated = False
         script, shots = fallback_storyboard(doc)
+
+    existing_status_by_index = {
+        int(previous.get("index", index)): previous.get("status")
+        for index, previous in enumerate(doc.get("storyboard") or [])
+        if isinstance(previous, dict)
+    }
+    for i, s in enumerate(shots):
+        s["index"] = i
+        previous_status = existing_status_by_index.get(i)
+        s["status"] = previous_status if previous_status in {"captured", "retake"} else "pending"
 
     doc.update({"storyboard": shots, "script": script, "status": "storyboarded",
                 "storyboard_ai_generated": ai_generated,
