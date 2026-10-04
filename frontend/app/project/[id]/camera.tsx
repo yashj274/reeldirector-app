@@ -455,7 +455,7 @@ export default function DirectorCamera() {
     return (
       <View style={[styles.root, styles.center]} testID="camera-permission-screen">
         <Ionicons name="videocam-outline" size={48} color={theme.color.onSurface2} />
-        <Text style={styles.permTitle}>{Platform.OS === 'web' ? t('camera_mic_title') : 'Camera access needed'}</Text>
+        <Text style={styles.permTitle}>Camera access needed</Text>
         <Text style={styles.permSub}>{webCameraNeedsHttps
           ? t('camera_https_copy')
           : Platform.OS === 'web'
