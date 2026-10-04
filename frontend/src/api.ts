@@ -227,13 +227,18 @@ export const api = {
     return { ok: true };
   },
   deleteProject: async (id: string) => {
-    const project = await readProject(id);
-    const paths = (project.clips || []).flatMap((clip: any) => [
-      clip.frame_storage_path, clip.video_storage_path,
-    ]).filter(Boolean);
-    if (project.soundtrack?.storage_path) paths.push(project.soundtrack.storage_path);
-    if (project.export?.storage_path) paths.push(project.export.storage_path);
     const user = await currentUser();
+    const { data, error: readError } = await getSupabase().from('projects').select('data')
+      .eq('id', id).eq('user_id', user.id).maybeSingle();
+    if (readError) throw readError;
+    if (!data?.data) throw new Error('Project not found');
+    const project = data.data;
+    const projectPrefix = `${user.id}/${id}/`;
+    const paths: string[] = [
+      ...(project.clips || []).flatMap((clip: any) => [clip.frame_storage_path, clip.video_storage_path]),
+      project.soundtrack?.storage_path,
+      project.export?.storage_path,
+    ].filter((path: unknown): path is string => typeof path === 'string' && path.startsWith(projectPrefix));
     const { error } = await getSupabase().from('projects').delete()
       .eq('id', id).eq('user_id', user.id);
     if (error) throw error;

@@ -81,6 +81,8 @@ const STRINGS: Record<string, Record<string, string>> = {
     send_feedback: 'Send Feedback', privacy: 'Privacy', log_out: 'Log out', home: 'Home', all_projects: 'Projects',
     project_status_draft: 'Draft', project_status_storyboarded: 'Script ready', project_status_shooting: 'In progress',
     project_status_exported: 'Exported', edit_this_video: 'Edit this video',
+    delete_project: 'Delete project', delete_project_confirm: 'Delete “{title}”? Its clips, soundtrack, and exports will also be deleted.',
+    delete_project_action: 'Delete', delete_project_failed: 'Could not delete this project. Please try again.',
     edit_video_features: 'Trim clips · filters · text & fonts · sound', duration_label: 'Duration', aspect_label: 'Aspect',
     size_label: 'Size', style_label: 'Style', music_label: 'Music', captions_label: 'Captions', render_label: 'Render',
     none: 'None', on: 'On', off: 'Off', content: 'Content', download: 'Download', saved_to_cloud: 'Saved to cloud',
@@ -171,6 +173,8 @@ const STRINGS: Record<string, Record<string, string>> = {
     stability: 'स्थिरता', clip_saved: 'क्लिप सेव हुई', great_shot: 'बहुत अच्छा शॉट!', retake_suggested: 'दोबारा लेना बेहतर होगा',
     retake_required: 'दोबारा शूट करें', your_shot: 'आपका शॉट · फिर से देखें', retake: 'फिर से लें', next_shot: 'अगला शॉट',
     finish_edit: 'पूरा करें और एडिट करें',
+    delete_project: 'प्रोजेक्ट हटाएँ', delete_project_confirm: '“{title}” हटाएँ? इसकी क्लिप, संगीत और एक्सपोर्ट भी हट जाएँगे।',
+    delete_project_action: 'हटाएँ', delete_project_failed: 'प्रोजेक्ट हटाया नहीं जा सका। फिर कोशिश करें।',
   },
   es: {
     welcome_back: 'Bienvenido', new_reel: 'Nuevo Reel', dashboard: 'Inicio',
@@ -205,6 +209,8 @@ const STRINGS: Record<string, Record<string, string>> = {
     stability: 'Estabilidad', clip_saved: 'Clip guardado', great_shot: '¡Gran toma!', retake_suggested: 'Se recomienda repetir',
     retake_required: 'Hay que repetir', your_shot: 'Tu toma · volver a verla', retake: 'Repetir', next_shot: 'Siguiente toma',
     finish_edit: 'Finalizar y editar',
+    delete_project: 'Eliminar proyecto', delete_project_confirm: '¿Eliminar “{title}”? También se eliminarán sus clips, audio y videos exportados.',
+    delete_project_action: 'Eliminar', delete_project_failed: 'No se pudo eliminar el proyecto. Inténtalo de nuevo.',
   },
 };
 
