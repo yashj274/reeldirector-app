@@ -9,11 +9,13 @@ import { BlurView } from 'expo-blur';
 
 import { api } from '@/src/api';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 const SHOT_SIZES = ['extreme_wide', 'wide', 'medium', 'close_up', 'extreme_close_up'];
 const MOVES = ['static', 'pan_left', 'pan_right', 'tilt_up', 'tilt_down', 'dolly_in', 'dolly_out', 'tracking', 'orbit', 'reveal', 'handheld'];
 
 export default function EditStoryboard() {
+  const t = useT();
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const [shots, setShots] = useState<any[]>([]);
@@ -48,9 +50,9 @@ export default function EditStoryboard() {
     setShots(next);
   };
   const add = () => setShots([...shots, {
-    title: 'New Shot', description: 'Describe this shot',
+    title: t('new_shot'), description: t('describe_shot'),
     camera_movement: 'static', shot_size: 'medium',
-    duration_seconds: 3.0, direction: 'Hold camera steady', status: 'pending',
+    duration_seconds: 3.0, direction: t('hold_camera_steady'), status: 'pending',
   }]);
   const patch = (i: number, key: string, value: any) => {
     const next = [...shots]; next[i] = { ...next[i], [key]: value }; setShots(next);
@@ -93,9 +95,9 @@ export default function EditStoryboard() {
           <Pressable onPress={() => router.back()} testID="edit-storyboard-back">
             <Ionicons name="close" size={26} color={theme.color.onSurface} />
           </Pressable>
-          <Text style={styles.title}>Customize storyboard</Text>
+          <Text style={styles.title}>{t('customize_storyboard')}</Text>
           <Pressable onPress={save} disabled={saving} testID="edit-storyboard-save">
-            {saving ? <ActivityIndicator color={theme.color.brand} /> : <Text style={styles.saveText}>Save</Text>}
+            {saving ? <ActivityIndicator color={theme.color.brand} /> : <Text style={styles.saveText}>{t('save')}</Text>}
           </Pressable>
         </View>
 
@@ -118,7 +120,7 @@ export default function EditStoryboard() {
               <TextInput
                 value={s.description}
                 onChangeText={(v) => patch(i, 'description', v)}
-                placeholder="Description"
+                placeholder={t('description_label')}
                 placeholderTextColor={theme.color.onSurface3}
                 multiline
                 style={styles.desc}
@@ -128,11 +130,11 @@ export default function EditStoryboard() {
               <View style={styles.metaRow}>
                 <Pressable style={styles.metaChip} onPress={() => cycle(i, 'shot_size', SHOT_SIZES)} testID={`edit-shot-size-${i}`}>
                   <Ionicons name="scan-outline" size={13} color={theme.color.brand} />
-                  <Text style={styles.metaText}>{s.shot_size?.replace('_', ' ')}</Text>
+                  <Text style={styles.metaText}>{t(`shot_size_${s.shot_size}`)}</Text>
                 </Pressable>
                 <Pressable style={styles.metaChip} onPress={() => cycle(i, 'camera_movement', MOVES)} testID={`edit-shot-move-${i}`}>
                   <Ionicons name="videocam-outline" size={13} color={theme.color.brand} />
-                  <Text style={styles.metaText}>{s.camera_movement?.replace('_', ' ')}</Text>
+                  <Text style={styles.metaText}>{t(`move_${s.camera_movement}`)}</Text>
                 </Pressable>
                 <View style={styles.metaChip}>
                   <Ionicons name="time-outline" size={13} color={theme.color.brand} />
@@ -167,7 +169,7 @@ export default function EditStoryboard() {
 
           <Pressable style={styles.addBtn} onPress={add} testID="edit-shot-add">
             <Ionicons name="add" size={20} color={theme.color.brand} />
-            <Text style={styles.addText}>Add scene</Text>
+            <Text style={styles.addText}>{t('add_scene')}</Text>
           </Pressable>
         </ScrollView>
       </SafeAreaView>
@@ -176,13 +178,13 @@ export default function EditStoryboard() {
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalRoot}>
           <BlurView tint="dark" intensity={40} style={StyleSheet.absoluteFill} />
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Regenerate scene {regenIdx != null ? regenIdx + 1 : ''}</Text>
-            <Text style={styles.modalSub}>Optional notes to steer the AI.</Text>
+            <Text style={styles.modalTitle}>{t('regenerate_scene')} {regenIdx != null ? regenIdx + 1 : ''}</Text>
+            <Text style={styles.modalSub}>{t('optional_ai_notes')}</Text>
             <View style={[styles.desc, { marginTop: 12, minHeight: 90, padding: 12 }]}>
               <TextInput
                 value={regenNotes}
                 onChangeText={setRegenNotes}
-                placeholder="Ex: more dramatic, add golden hour light"
+                placeholder={t('regen_notes_example')}
                 placeholderTextColor={theme.color.onSurface3}
                 multiline
                 style={{ color: theme.color.onSurface, fontSize: 15, flex: 1, textAlignVertical: 'top' }}
@@ -192,13 +194,13 @@ export default function EditStoryboard() {
             </View>
             <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
               <Pressable style={styles.modalGhost} onPress={() => setRegenIdx(null)} testID="regen-cancel">
-                <Text style={styles.modalGhostText}>Cancel</Text>
+                <Text style={styles.modalGhostText}>{t('cancel')}</Text>
               </Pressable>
               <Pressable style={styles.modalPrimary} onPress={runRegen} disabled={regenBusy} testID="regen-run">
                 {regenBusy ? <ActivityIndicator color="#fff" /> : (
                   <>
                     <Ionicons name="sparkles" size={16} color="#fff" />
-                    <Text style={styles.modalPrimaryText}>Regenerate</Text>
+                    <Text style={styles.modalPrimaryText}>{t('regenerate')}</Text>
                   </>
                 )}
               </Pressable>

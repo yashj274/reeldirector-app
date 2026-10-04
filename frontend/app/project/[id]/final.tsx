@@ -15,6 +15,7 @@ import { File, Paths } from 'expo-file-system';
 
 import { api } from '@/src/api';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 const STYLES = ['cinematic', 'luxury', 'minimal', 'action', 'editorial', 'warm', 'fast_pace'];
 const RATIOS = [
@@ -25,6 +26,7 @@ const RATIOS = [
 ];
 
 export default function FinalPlayer() {
+  const t = useT();
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const [project, setProject] = useState<any>(null);
@@ -101,9 +103,9 @@ export default function FinalPlayer() {
       const permission = await MediaLibrary.requestPermissionsAsync(true, ['video']);
       if (!permission.granted) throw new Error('Allow photo-library access to save the video.');
       await MediaLibrary.saveToLibraryAsync(local.uri);
-      Alert.alert('Video saved', 'Your finished reel is in your photo library.');
+      Alert.alert(t('video_saved'), t('reel_saved_library'));
     } catch (e: any) {
-      Alert.alert('Could not save video', e.message || 'Please try again.');
+      Alert.alert(t('save_video_failed'), e.message || t('try_again'));
     } finally {
       setDownloading(false);
     }
@@ -118,7 +120,7 @@ export default function FinalPlayer() {
     return (
       <View style={[styles.root, { alignItems: 'center', justifyContent: 'center' }]}>
         <ActivityIndicator color={theme.color.brand} />
-        <Text style={{ color: theme.color.onSurface2, marginTop: 12 }}>Loading your reel…</Text>
+        <Text style={{ color: theme.color.onSurface2, marginTop: 12 }}>{t('loading_reel')}</Text>
       </View>
     );
   }
@@ -127,9 +129,9 @@ export default function FinalPlayer() {
     return (
       <View style={[styles.root, { alignItems: 'center', justifyContent: 'center', padding: 28 }]}>
         <Ionicons name="alert-circle-outline" size={42} color={theme.color.error} />
-        <Text style={{ color: theme.color.onSurface, fontWeight: '700', fontSize: 18, marginTop: 12 }}>Could not open this reel</Text>
-        <Text style={{ color: theme.color.onSurface2, textAlign: 'center', marginTop: 8 }}>{loadError || 'The project is unavailable.'}</Text>
-        <Pressable style={styles.errorBack} onPress={() => router.back()}><Text style={{ color: '#fff', fontWeight: '700' }}>Go back</Text></Pressable>
+        <Text style={{ color: theme.color.onSurface, fontWeight: '700', fontSize: 18, marginTop: 12 }}>{t('could_not_open_reel')}</Text>
+        <Text style={{ color: theme.color.onSurface2, textAlign: 'center', marginTop: 8 }}>{loadError || t('project_unavailable')}</Text>
+        <Pressable style={styles.errorBack} onPress={() => router.back()}><Text style={{ color: '#fff', fontWeight: '700' }}>{t('go_back')}</Text></Pressable>
       </View>
     );
   }
@@ -143,7 +145,7 @@ export default function FinalPlayer() {
           <Pressable onPress={() => router.back()} testID="final-back">
             <Ionicons name="chevron-back" size={26} color={theme.color.onSurface} />
           </Pressable>
-          <Text style={styles.title} numberOfLines={1}>Your reel is ready</Text>
+          <Text style={styles.title} numberOfLines={1}>{t('reel_ready')}</Text>
           <Pressable onPress={shareIt} testID="final-share-icon">
             <Ionicons name="share-outline" size={22} color={theme.color.onSurface} />
           </Pressable>
@@ -179,15 +181,15 @@ export default function FinalPlayer() {
             <Text style={styles.metaHead}>{project.title}</Text>
             <Text style={styles.metaBlurb}>{exp.summary}</Text>
             <View style={styles.metaGrid}>
-              <MetaCell label="Duration" value={`${(exp.duration_seconds || 0).toFixed(1)}s`} />
+              <MetaCell label={t('duration_label')} value={`${(exp.duration_seconds || 0).toFixed(1)}s`} />
               <MetaCell label="Resolution" value={exp.resolution} />
               <MetaCell label="Frame rate" value={`${exp.fps} fps`} />
-              <MetaCell label="Aspect" value={exp.aspect_ratio} />
-              <MetaCell label="Size" value={`${exp.size_mb} MB`} />
-              <MetaCell label="Style" value={styleName} />
-              <MetaCell label="Music" value={exp.music?.title || 'None'} />
-              <MetaCell label="Captions" value={exp.captions ? 'On' : 'Off'} />
-              <MetaCell label="Render" value={`${exp.render_seconds}s`} />
+              <MetaCell label={t('aspect_label')} value={exp.aspect_ratio} />
+              <MetaCell label={t('size_label')} value={`${exp.size_mb} MB`} />
+              <MetaCell label={t('style_label')} value={styleName} />
+              <MetaCell label={t('music_label')} value={exp.music?.title || t('none')} />
+              <MetaCell label={t('captions_label')} value={exp.captions ? t('on') : t('off')} />
+              <MetaCell label={t('render_label')} value={`${exp.render_seconds}s`} />
             </View>
           </View>
 
@@ -198,8 +200,8 @@ export default function FinalPlayer() {
           >
             <View style={styles.editVideoIcon}><Ionicons name="options-outline" size={22} color="#fff" /></View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.editVideoTitle}>Edit this video</Text>
-              <Text style={styles.editVideoSubtitle}>Trim clips · filters · text & fonts · sound</Text>
+              <Text style={styles.editVideoTitle}>{t('edit_this_video')}</Text>
+              <Text style={styles.editVideoSubtitle}>{t('edit_video_features')}</Text>
             </View>
             <Ionicons name="chevron-forward" size={20} color="#fff" />
           </Pressable>
@@ -207,30 +209,30 @@ export default function FinalPlayer() {
           <View style={styles.actionsWrap}>
             {!!actionError && <Text style={styles.actionError} accessibilityRole="alert">{actionError}</Text>}
             <ActionRow>
-              <BigAction icon="play" label="Play" onPress={() => player.play()} testID="final-play" />
-              <BigAction icon="pause" label="Pause" onPress={() => player.pause()} testID="final-pause" />
-              <BigAction icon="expand" label="Full" onPress={() => setFs(true)} testID="final-full" />
-              <BigAction icon="share-social" label="Share" onPress={shareIt} testID="final-share" />
+              <BigAction icon="play" label={t('play')} onPress={() => player.play()} testID="final-play" />
+              <BigAction icon="pause" label={t('pause')} onPress={() => player.pause()} testID="final-pause" />
+              <BigAction icon="expand" label={t('full')} onPress={() => setFs(true)} testID="final-full" />
+              <BigAction icon="share-social" label={t('share')} onPress={shareIt} testID="final-share" />
             </ActionRow>
 
-            <SecActionRow title="Content">
-              <SecAction icon="download-outline" label="Download" onPress={downloadIt} busy={downloading} testID="final-download" />
-              <SecAction icon="cloud-outline" label="Saved to cloud" onPress={() => Alert.alert('Saved to cloud', 'Your reel is securely stored with this project.')} testID="final-cloud" />
-              <SecAction icon="save-outline" label="Save project" onPress={() => router.push('/(tabs)/projects')} testID="final-save-project" />
+            <SecActionRow title={t('content')}>
+              <SecAction icon="download-outline" label={t('download')} onPress={downloadIt} busy={downloading} testID="final-download" />
+              <SecAction icon="cloud-outline" label={t('saved_to_cloud')} onPress={() => Alert.alert(t('saved_to_cloud'), 'Your reel is securely stored with this project.')} testID="final-cloud" />
+              <SecAction icon="save-outline" label={t('save_project')} onPress={() => router.push('/(tabs)/projects')} testID="final-save-project" />
             </SecActionRow>
 
-            <SecActionRow title="Change & Regenerate">
-              <SecAction icon="musical-notes-outline" label="Change music" onPress={() => router.push({ pathname: '/project/[id]/music', params: { id: id!, current: exp.music?.id || '' } })} testID="final-change-music" />
-              <SecAction icon="color-palette-outline" label="Change style" onPress={() => cycleStyle(exp.editing_style, rebuild)} testID="final-change-style" />
-              <SecAction icon="refresh" label="Regenerate" onPress={() => rebuild()} testID="final-regenerate" busy={rebuilding} />
-              <SecAction icon="brush-outline" label="Edit again" onPress={() => router.push({ pathname: '/project/[id]/edit-storyboard', params: { id: id! } })} testID="final-edit-again" />
+            <SecActionRow title={t('change_regenerate')}>
+              <SecAction icon="musical-notes-outline" label={t('change_music')} onPress={() => router.push({ pathname: '/project/[id]/music', params: { id: id!, current: exp.music?.id || '' } })} testID="final-change-music" />
+              <SecAction icon="color-palette-outline" label={t('change_style')} onPress={() => cycleStyle(exp.editing_style, rebuild)} testID="final-change-style" />
+              <SecAction icon="refresh" label={t('regenerate')} onPress={() => rebuild()} testID="final-regenerate" busy={rebuilding} />
+              <SecAction icon="brush-outline" label={t('edit_again')} onPress={() => router.push({ pathname: '/project/[id]/edit-storyboard', params: { id: id! } })} testID="final-edit-again" />
             </SecActionRow>
 
-            <SecActionRow title="Export for">
+            <SecActionRow title={t('export_for')}>
               <SecAction icon="logo-instagram" label="Instagram" onPress={() => rebuild({ aspect_ratio: '9:16' })} testID="final-export-ig" />
               <SecAction icon="musical-note" label="TikTok" onPress={() => rebuild({ aspect_ratio: '9:16' })} testID="final-export-tt" />
               <SecAction icon="logo-youtube" label="YouTube video" onPress={() => rebuild({ aspect_ratio: '16:9' })} testID="final-export-yt" />
-              <SecAction icon="apps-outline" label="More formats" onPress={() => setShowFormats(true)} testID="final-more-formats" />
+              <SecAction icon="apps-outline" label={t('more_formats')} onPress={() => setShowFormats(true)} testID="final-more-formats" />
             </SecActionRow>
           </View>
         </ScrollView>
@@ -239,7 +241,7 @@ export default function FinalPlayer() {
           <View style={styles.rebuildOverlay} pointerEvents="none">
             <BlurView tint="dark" intensity={30} style={StyleSheet.absoluteFill} />
             <ActivityIndicator color={theme.color.brand} size="large" />
-            <Text style={styles.rebuildText}>Rendering your video…</Text>
+            <Text style={styles.rebuildText}>{t('rendering_video')}</Text>
           </View>
         )}
       </SafeAreaView>
@@ -260,7 +262,7 @@ export default function FinalPlayer() {
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowFormats(false)} />
           <View style={styles.sheet}>
             <View style={styles.sheetHandle} />
-            <Text style={styles.sheetTitle}>Export in another format</Text>
+            <Text style={styles.sheetTitle}>{t('export_other_format')}</Text>
             {RATIOS.map((r) => (
               <Pressable key={r.id} style={styles.sheetRow}
                 onPress={() => { setShowFormats(false); rebuild({ aspect_ratio: r.id.startsWith('9:16') ? '9:16' : r.id }); }}

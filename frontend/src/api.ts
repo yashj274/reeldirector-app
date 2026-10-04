@@ -4,6 +4,7 @@ import * as Linking from 'expo-linking';
 import { Platform } from 'react-native';
 import { decode } from 'base64-arraybuffer';
 import { getSupabase, hasSupabaseConfig } from '@/src/supabase';
+import { getLanguage } from '@/src/i18n';
 
 const configuredBackend = (Constants.expoConfig?.extra?.backendUrl || '').replace(/\/+$/, '');
 function getBackendBase() {
@@ -178,6 +179,20 @@ export const api = {
     if (!data.session) throw new Error('Confirm your email before signing in.');
     return { user: profile(data.user) };
   },
+  requestPasswordReset: async (email: string) => {
+    const resetPath = '/(auth)/reset-password?mode=update';
+    const redirectTo = Platform.OS === 'web' && typeof window !== 'undefined'
+      ? `${window.location.origin}/auth/callback?${new URLSearchParams({ next: resetPath }).toString()}`
+      : Linking.createURL('auth/callback', { queryParams: { next: resetPath } });
+    const { error } = await getSupabase().auth.resetPasswordForEmail(email, { redirectTo });
+    if (error) throw error;
+    return { ok: true };
+  },
+  updatePassword: async (password: string) => {
+    const { error } = await getSupabase().auth.updateUser({ password });
+    if (error) throw error;
+    return { ok: true };
+  },
   me: async () => profile(await currentUser()),
   templates: async () => TEMPLATES,
   createProject: async (payload: any) => {
@@ -225,13 +240,15 @@ export const api = {
     await deleteStoredFrames(paths);
     return { ok: true };
   },
-  storyboard: (id: string) => request(`/projects/${id}/storyboard`, { method: 'POST' }),
-  scan: (image_base64: string) => request('/scan', {
-    method: 'POST', body: JSON.stringify({ image_base64 }),
+  storyboard: async (id: string) => request(`/projects/${id}/storyboard`, {
+    method: 'POST', body: JSON.stringify({ language: await getLanguage() }),
   }),
-  director: (project_id: string, shot_index: number, image_base64?: string) =>
+  scan: async (project_id: string, image_base64: string) => request('/scan', {
+    method: 'POST', body: JSON.stringify({ project_id, image_base64, language: await getLanguage() }),
+  }),
+  director: async (project_id: string, shot_index: number, image_base64?: string) =>
     request('/director/instruct', {
-      method: 'POST', body: JSON.stringify({ project_id, shot_index, image_base64 }),
+      method: 'POST', body: JSON.stringify({ project_id, shot_index, image_base64, language: await getLanguage() }),
     }),
   clipQuality: async (
     project_id: string,
@@ -239,8 +256,10 @@ export const api = {
     frame_base64: string,
     duration_seconds: number,
     video: { uri?: string; blob?: Blob; mimeType?: string },
+    brightness = 0,
   ) => {
     const user = await currentUser();
+    const language = await getLanguage();
     const prefix = `${user.id}/${project_id}`;
     const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const frame_storage_path = `${prefix}/${stamp}.jpg`;
@@ -271,7 +290,7 @@ export const api = {
       try {
         quality = await request('/clips/quality', {
           method: 'POST',
-          body: JSON.stringify({ project_id, shot_index, frame_base64, duration_seconds, frame_storage_path, video_storage_path }),
+          body: JSON.stringify({ project_id, shot_index, frame_base64, duration_seconds, brightness, language, frame_storage_path, video_storage_path }),
         });
       } catch {
         quality = {
@@ -283,7 +302,7 @@ export const api = {
       }
       const project = await readProject(project_id);
       const clips = [...(project.clips || []), {
-        shot_index, duration_seconds, quality, recorded_at: new Date().toISOString(),
+        shot_index, duration_seconds, quality, brightness: Math.max(-0.5, Math.min(0.5, brightness)), recorded_at: new Date().toISOString(),
         frame_storage_path, video_storage_path,
       }];
       const storyboard = project.storyboard || [];
@@ -336,8 +355,8 @@ export const api = {
     await updateProjectData({ ...project, storyboard: shots, updated_at: new Date().toISOString() });
     return { storyboard: shots };
   },
-  regenerateShot: (id: string, shot_index: number, notes?: string) => request(`/projects/${id}/storyboard/regenerate`, {
-    method: 'POST', body: JSON.stringify({ shot_index, notes }),
+  regenerateShot: async (id: string, shot_index: number, notes?: string) => request(`/projects/${id}/storyboard/regenerate`, {
+    method: 'POST', body: JSON.stringify({ shot_index, notes, language: await getLanguage() }),
   }),
   retakeShot: async (id: string, shot_index: number) => {
     const project = await readProject(id);

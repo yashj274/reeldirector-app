@@ -12,8 +12,10 @@ import * as Haptics from 'expo-haptics';
 
 import { api, getUser } from '@/src/api';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 export default function Dashboard() {
+  const t = useT();
   const router = useRouter();
   const [templates, setTemplates] = useState<any[]>([]);
   const [projects, setProjects] = useState<any[]>([]);
@@ -66,8 +68,8 @@ export default function Dashboard() {
         >
           <View style={styles.header}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.hello}>Hey {user?.name?.split(' ')[0] || 'Director'}</Text>
-              <Text style={styles.title}>Ready to make magic?</Text>
+              <Text style={styles.hello}>{t('dashboard_hello').replace('{name}', user?.name?.split(' ')[0] || 'Director')}</Text>
+              <Text style={styles.title}>{t('ready_magic')}</Text>
             </View>
             <Pressable style={styles.avatar} onPress={() => router.push('/(tabs)/profile')} testID="dashboard-avatar">
               <Text style={styles.avatarText}>{(user?.name?.[0] || 'D').toUpperCase()}</Text>
@@ -78,11 +80,11 @@ export default function Dashboard() {
             <View style={styles.loadError} testID="dashboard-load-error">
               <Text style={styles.loadErrorText}>{loadError}</Text>
               <Pressable onPress={() => { setRefreshing(true); load(); }} testID="dashboard-retry-button">
-                <Text style={styles.loadErrorAction}>Try again</Text>
+                <Text style={styles.loadErrorAction}>{t('try_again')}</Text>
               </Pressable>
               {/sign in|session/i.test(loadError) ? (
                 <Pressable onPress={() => router.replace('/(auth)/login')} testID="dashboard-sign-in-again">
-                  <Text style={styles.loadErrorAction}>Sign in again</Text>
+                  <Text style={styles.loadErrorAction}>{t('sign_in_again')}</Text>
                 </Pressable>
               ) : null}
             </View>
@@ -94,8 +96,8 @@ export default function Dashboard() {
               style={StyleSheet.absoluteFill} />
             <View style={styles.ctaInner}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.ctaTitle}>Start a new reel</Text>
-                <Text style={styles.ctaSub}>AI plans, directs, and edits for you.</Text>
+                <Text style={styles.ctaTitle}>{t('start_new_reel')}</Text>
+                <Text style={styles.ctaSub}>{t('ai_plans_directs_edits')}</Text>
               </View>
               <View style={styles.ctaIcon}>
                 <Ionicons name="arrow-forward" size={22} color="#fff" />
@@ -103,7 +105,7 @@ export default function Dashboard() {
             </View>
           </Pressable>
 
-          <Text style={styles.sectionTitle}>Cinematic Templates</Text>
+          <Text style={styles.sectionTitle}>{t('cinematic_templates')}</Text>
           <FlatList
             data={templates}
             horizontal
@@ -115,24 +117,24 @@ export default function Dashboard() {
                 <Image source={{ uri: item.image }} style={StyleSheet.absoluteFill} contentFit="cover" />
                 <LinearGradient colors={['transparent', 'rgba(10,11,14,0.9)']} style={StyleSheet.absoluteFill} />
                 <View style={styles.tplText}>
-                  <Text style={styles.tplName}>{item.name}</Text>
-                  <Text style={styles.tplMood}>{item.mood} · {item.duration}s</Text>
+                  <Text style={styles.tplName}>{t(`template_${item.id}`)}</Text>
+                  <Text style={styles.tplMood}>{t(`template_mood_${item.id}`)} · {item.duration}s</Text>
                 </View>
               </Pressable>
             )}
           />
 
           <View style={styles.recentHead}>
-            <Text style={styles.sectionTitle}>Recent projects</Text>
+            <Text style={styles.sectionTitle}>{t('recent_projects')}</Text>
             <Pressable onPress={() => router.push('/(tabs)/projects')}>
-              <Text style={{ color: theme.color.brand, fontWeight: '600' }}>See all</Text>
+              <Text style={{ color: theme.color.brand, fontWeight: '600' }}>{t('see_all')}</Text>
             </Pressable>
           </View>
 
           {projects.length === 0 ? (
             <View style={styles.empty}>
               <Ionicons name="film-outline" size={40} color={theme.color.onSurface3} />
-              <Text style={styles.emptyText}>Your first masterpiece is one tap away.</Text>
+              <Text style={styles.emptyText}>{t('first_masterpiece')}</Text>
             </View>
           ) : (
             <View style={{ paddingHorizontal: 20, gap: 12 }}>
@@ -149,7 +151,7 @@ export default function Dashboard() {
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.projTitle} numberOfLines={1}>{p.title}</Text>
-                    <Text style={styles.projMeta}>{p.shoot_type} · {p.status}</Text>
+                    <Text style={styles.projMeta}>{p.shoot_type} · {t(`project_status_${p.status}`)}</Text>
                   </View>
                   <Ionicons name="chevron-forward" size={20} color={theme.color.onSurface3} />
                 </Pressable>

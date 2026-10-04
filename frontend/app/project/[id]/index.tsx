@@ -10,8 +10,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { api } from '@/src/api';
 import { theme } from '@/src/theme';
 import { ClipVideoPreview } from '@/src/ClipVideoPreview';
+import { useT } from '@/src/i18n';
 
 export default function ProjectDetail() {
+  const t = useT();
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const [proj, setProj] = useState<any>(null);
@@ -79,7 +81,7 @@ export default function ProjectDetail() {
           <View style={styles.metaCard}>
             <Text style={styles.metaLabel}>{proj.shoot_type.toUpperCase()} · {proj.style.toUpperCase()}</Text>
             <Text style={styles.metaTitle}>{proj.mood} · {proj.duration_seconds}s</Text>
-            <Text style={styles.metaSub}>{proj.purpose || 'No purpose set'}</Text>
+            <Text style={styles.metaSub}>{proj.purpose || t('no_purpose')}</Text>
           </View>
           {(storyboardNotice || proj.storyboard_ai_generated === false) && (
             <Text style={styles.storyboardNotice} accessibilityRole="alert">
@@ -93,13 +95,26 @@ export default function ProjectDetail() {
               <LinearGradient colors={[theme.color.brand, theme.color.brandDim]} style={StyleSheet.absoluteFill} />
               <View style={styles.bigCtaInner}>
                 {generating ? <ActivityIndicator color="#fff" /> : <Ionicons name="sparkles" size={22} color="#fff" />}
-                <Text style={styles.bigCtaText}>{generating ? 'Directing your shoot...' : 'Generate AI Storyboard'}</Text>
+                <Text style={styles.bigCtaText}>{generating ? t('directing_your_shoot') : t('generate_storyboard')}</Text>
               </View>
             </Pressable>
           ) : (
             <>
+              {!!proj.scene_map?.summary && (
+                <View style={styles.scanCard}>
+                  <Text style={styles.scanLabel}>{t('scene_scan_label')}</Text>
+                  <Text style={styles.scanSummary}>{proj.scene_map.summary}</Text>
+                  {proj.scene_map.ai_generated === false && <Text style={styles.scanFallback}>{t('scan_fallback')}</Text>}
+                </View>
+              )}
+              {!!proj.script && (
+                <View style={styles.scriptCard}>
+                  <Text style={styles.scriptLabel}>{t('custom_script')}</Text>
+                  <Text style={styles.scriptText}>{proj.script}</Text>
+                </View>
+              )}
               <View style={styles.progressRow}>
-                <Text style={styles.sectionTitle}>Storyboard</Text>
+                <Text style={styles.sectionTitle}>{t('storyboard')}</Text>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
                   <Pressable onPress={() => router.push({ pathname: '/project/[id]/edit-storyboard', params: { id: id! } })} testID="project-customize-storyboard">
                     <Ionicons name="options-outline" size={20} color={theme.color.brand} />
@@ -122,6 +137,8 @@ export default function ProjectDetail() {
                     <View style={{ flex: 1 }}>
                       <Text style={styles.shotTitle}>{s.title}</Text>
                       <Text style={styles.shotDesc} numberOfLines={2}>{s.description}</Text>
+                      {!!s.narration && <Text style={styles.shotNarration}>{s.narration}</Text>}
+                      {!!s.on_screen_text && <Text style={styles.shotCaption}>{s.on_screen_text}</Text>}
                       <View style={styles.shotTags}>
                         <Text style={styles.shotTag}>{(s.shot_size || '').replace('_', ' ')}</Text>
                         <Text style={styles.shotTag}>{(s.camera_movement || '').replace('_', ' ')}</Text>
@@ -160,14 +177,14 @@ export default function ProjectDetail() {
                 onPress={() => router.push({ pathname: '/project/[id]/scan', params: { id: id! } })}
                 testID="project-open-scanner">
                 <Ionicons name="scan-outline" size={18} color={theme.color.brand} />
-                <Text style={styles.actionText}>AI scan environment</Text>
+                <Text style={styles.actionText}>{t('scene_scan_label')}</Text>
               </Pressable>
 
               <Pressable style={styles.primary}
                 onPress={() => router.push({ pathname: '/project/[id]/camera', params: { id: id!, shot: '0' } })}
                 testID="project-start-shooting">
                 <Ionicons name="videocam" size={18} color="#fff" />
-                <Text style={styles.primaryText}>{captured === 0 ? 'Start shooting' : captured < total ? 'Continue shooting' : 'Reshoot'}</Text>
+                <Text style={styles.primaryText}>{captured === 0 ? t('start_shooting') : captured < total ? t('continue_shooting') : t('reshoot')}</Text>
               </Pressable>
 
               {captured >= 1 && (
@@ -176,13 +193,13 @@ export default function ProjectDetail() {
                     onPress={() => router.push({ pathname: '/project/[id]/final', params: { id: id! } })}
                     testID="project-goto-final">
                     <Ionicons name="play-circle" size={18} color={theme.color.onSurface} />
-                    <Text style={[styles.primaryText, { color: theme.color.onSurface }]}>Preview final reel</Text>
+                    <Text style={[styles.primaryText, { color: theme.color.onSurface }]}>{t('preview_final_reel')}</Text>
                   </Pressable>
                   <Pressable style={[styles.primary, { backgroundColor: theme.color.surface3, borderWidth: 1, borderColor: theme.color.borderStrong }]}
                     onPress={() => router.push({ pathname: '/project/[id]/export', params: { id: id! } })}
                     testID="project-goto-export">
                     <Ionicons name="rocket-outline" size={18} color={theme.color.onSurface} />
-                    <Text style={[styles.primaryText, { color: theme.color.onSurface }]}>Edit video & export</Text>
+                    <Text style={[styles.primaryText, { color: theme.color.onSurface }]}>{t('edit_video_export')}</Text>
                   </Pressable>
                 </>
               )}
@@ -203,6 +220,13 @@ const styles = StyleSheet.create({
   metaLabel: { color: theme.color.brand, fontSize: 11, fontWeight: '700', letterSpacing: 1.5 },
   metaTitle: { color: theme.color.onSurface, fontSize: 22, fontWeight: '700', marginTop: 8, letterSpacing: -0.5 },
   metaSub: { color: theme.color.onSurface2, marginTop: 6, fontSize: 14 },
+  scanCard: { marginTop: 12, marginBottom: 10, padding: 15, borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border },
+  scanLabel: { color: theme.color.brand, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.5 },
+  scanSummary: { color: theme.color.onSurface, fontSize: 14, lineHeight: 20, marginTop: 6 },
+  scanFallback: { color: theme.color.onSurface3, fontSize: 11, marginTop: 5 },
+  scriptCard: { marginTop: 12, padding: 15, borderRadius: theme.radius.md, backgroundColor: theme.color.brandTint, borderWidth: 1, borderColor: theme.color.border },
+  scriptLabel: { color: theme.color.brand, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.5 },
+  scriptText: { color: theme.color.onSurface, fontSize: 14, lineHeight: 21, marginTop: 7 },
   bigCta: { height: 84, borderRadius: theme.radius.lg, overflow: 'hidden' },
   bigCtaInner: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
   bigCtaText: { color: '#fff', fontSize: 17, fontWeight: '700' },
@@ -216,6 +240,8 @@ const styles = StyleSheet.create({
   shotNumText: { color: theme.color.brand, fontWeight: '700' },
   shotTitle: { color: theme.color.onSurface, fontWeight: '700', fontSize: 15 },
   shotDesc: { color: theme.color.onSurface2, fontSize: 13, marginTop: 4 },
+  shotNarration: { color: theme.color.onSurface, fontSize: 12, lineHeight: 18, marginTop: 6, fontStyle: 'italic' },
+  shotCaption: { color: theme.color.brand, fontSize: 11, marginTop: 5, fontWeight: '700' },
   shotTags: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
   shotTag: { color: theme.color.onSurface3, fontSize: 11, backgroundColor: theme.color.surface3, paddingHorizontal: 8, paddingVertical: 3, borderRadius: theme.radius.pill, textTransform: 'capitalize' },
   clipReview: { marginTop: 12, gap: 8 },

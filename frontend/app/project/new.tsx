@@ -9,6 +9,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 
 import { api } from '@/src/api';
+import { getLanguage, useT } from '@/src/i18n';
 import { theme } from '@/src/theme';
 
 const DEFAULT_TYPES = [
@@ -16,7 +17,11 @@ const DEFAULT_TYPES = [
   'cafe', 'restaurant', 'event', 'documentary', 'business', 'lifestyle',
   'daily_vlog', 'social_media', 'cinematic',
 ];
-const label = (id: string) => id.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
+const label = (id: string, t: (key: string) => string) => {
+  const key = `shoot_type_${id}`;
+  const translated = t(key);
+  return translated === key ? id.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ') : translated;
+};
 
 const MOODS = ['Cinematic', 'Emotional', 'Energetic', 'Luxury', 'Minimal', 'Warm'];
 const DURATIONS = [15, 20, 30, 45, 60];
@@ -28,6 +33,7 @@ const PLATFORMS = [
 
 export default function NewProject() {
   const router = useRouter();
+  const t = useT();
   const params = useLocalSearchParams<{ template?: string; mood?: string; style?: string; duration?: string }>();
 
   const [title, setTitle] = useState('');
@@ -44,7 +50,7 @@ export default function NewProject() {
   const [customOpen, setCustomOpen] = useState(false);
   const [customName, setCustomName] = useState('');
 
-  const canSubmit = useMemo(() => title.trim().length >= 2, [title]);
+  const canSubmit = useMemo(() => title.trim().length >= 2 && purpose.trim().length >= 10, [title, purpose]);
 
   const addCustom = () => {
     const raw = customName.trim();
@@ -57,15 +63,17 @@ export default function NewProject() {
   };
 
   const submit = async () => {
+    if (title.trim().length < 2) { setCreateError(t('title_required_error')); return; }
+    if (purpose.trim().length < 10) { setCreateError(t('purpose_required')); return; }
     if (!canSubmit) return;
     setCreateError('');
     setBusy(true);
     try {
       const p = await api.createProject({
         title: title.trim(), shoot_type: shootType, purpose, mood, duration_seconds: duration,
-        style: (params.style as string) || 'cinematic', platform, audience,
+        style: (params.style as string) || 'cinematic', platform, audience, language: await getLanguage(),
       });
-      router.replace(`/project/${p.id}`);
+      router.replace({ pathname: '/project/[id]/scan', params: { id: p.id, flow: 'new' } });
     } catch (e: any) {
       console.warn('Project creation failed:', e);
       const message = typeof e?.message === 'string' ? e.message : '';
@@ -89,52 +97,55 @@ export default function NewProject() {
           <Pressable onPress={() => router.back()} testID="new-project-back">
             <Ionicons name="chevron-back" size={26} color={theme.color.onSurface} />
           </Pressable>
-          <Text style={styles.title}>New Reel</Text>
+          <Text style={styles.title}>{t('new_reel')}</Text>
           <View style={{ width: 26 }} />
         </View>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
-            <Text style={styles.label}>Give it a name</Text>
+            <Text style={styles.label}>{t('give_reel_name')}</Text>
             <View style={styles.input}>
-              <TextInput value={title} onChangeText={setTitle} placeholder="Ex: Sunset Rooftop"
+              <TextInput value={title} onChangeText={setTitle} placeholder={t('reel_name_example')}
                 placeholderTextColor={theme.color.onSurface3} style={styles.text}
                 testID="new-project-title" />
             </View>
 
-            <Text style={styles.label}>Type of shoot</Text>
+            <Text style={styles.label}>{t('type_of_shoot')}</Text>
             <View style={styles.chipRow}>
-              {types.map((id) => chip(shootType === id, label(id), () => setShootType(id), `chip-shoot-${id}`))}
+              {types.map((id) => chip(shootType === id, label(id, t), () => setShootType(id), `chip-shoot-${id}`))}
               <Pressable onPress={() => setCustomOpen(true)} style={[styles.chip, styles.chipAdd]} testID="chip-shoot-add-custom">
                 <Ionicons name="add" size={16} color={theme.color.brand} />
-                <Text style={[styles.chipText, { color: theme.color.brand, marginLeft: 4 }]}>Custom</Text>
+                <Text style={[styles.chipText, { color: theme.color.brand, marginLeft: 4 }]}>{t('custom')}</Text>
               </Pressable>
             </View>
 
-            <Text style={styles.label}>Mood</Text>
+            <Text style={styles.label}>{t('mood')}</Text>
             <View style={styles.chipRow}>
-              {MOODS.map((m) => chip(mood === m, m, () => setMood(m), `chip-mood-${m}`))}
+              {MOODS.map((m) => chip(mood === m, t(`mood_${m.toLowerCase()}`), () => setMood(m), `chip-mood-${m}`))}
             </View>
 
-            <Text style={styles.label}>Duration</Text>
+            <Text style={styles.label}>{t('duration')}</Text>
             <View style={styles.chipRow}>
               {DURATIONS.map((d) => chip(duration === d, `${d}s`, () => setDuration(d), `chip-dur-${d}`))}
             </View>
 
-            <Text style={styles.label}>Platform</Text>
+            <Text style={styles.label}>{t('platform')}</Text>
             <View style={styles.chipRow}>
               {PLATFORMS.map((p) => chip(platform === p.id, p.label, () => setPlatform(p.id), `chip-plat-${p.id}`))}
             </View>
 
-            <Text style={styles.label}>What is it for? (optional)</Text>
-            <View style={styles.input}>
-              <TextInput value={purpose} onChangeText={setPurpose} placeholder="Ex: launch of my new bakery"
-                placeholderTextColor={theme.color.onSurface3} style={styles.text}
+            <Text style={styles.label}>{t('purpose_label')} <Text style={{ color: theme.color.brand }}>*</Text></Text>
+            <View style={[styles.input, styles.purposeInput]}>
+              <TextInput value={purpose} onChangeText={(value) => { setPurpose(value); setCreateError(''); }}
+                placeholder={t('purpose_placeholder')}
+                placeholderTextColor={theme.color.onSurface3} style={[styles.text, styles.purposeText]}
+                multiline textAlignVertical="top" maxLength={500}
                 testID="new-project-purpose" />
             </View>
+            <Text style={styles.helper}>{t('purpose_hint')}</Text>
 
-            <Text style={styles.label}>Target audience (optional)</Text>
+            <Text style={styles.label}>{t('target_audience')}</Text>
             <View style={styles.input}>
-              <TextInput value={audience} onChangeText={setAudience} placeholder="Ex: 25-40, foodies"
+              <TextInput value={audience} onChangeText={setAudience} placeholder={t('audience_example')}
                 placeholderTextColor={theme.color.onSurface3} style={styles.text}
                 testID="new-project-audience" />
             </View>
@@ -149,7 +160,7 @@ export default function NewProject() {
             >
               {busy ? <ActivityIndicator color="#fff" /> : (
                 <>
-                  <Text style={styles.primaryText}>Create project</Text>
+                <Text style={styles.primaryText}>{t('create_project')}</Text>
                   <Ionicons name="arrow-forward" size={18} color="#fff" />
                 </>
               )}
@@ -159,7 +170,7 @@ export default function NewProject() {
                 <Text accessibilityRole="alert" testID="new-project-error" style={styles.error}>{createError}</Text>
                 {/sign in|session/i.test(createError) ? (
                   <Pressable onPress={() => router.replace('/(auth)/login')} testID="new-project-sign-in-again">
-                    <Text style={styles.errorAction}>Sign in again</Text>
+                    <Text style={styles.errorAction}>{t('sign_in_again')}</Text>
                   </Pressable>
                 ) : null}
               </View>
@@ -172,13 +183,13 @@ export default function NewProject() {
         <View style={styles.modalRoot}>
           <BlurView tint="dark" intensity={40} style={StyleSheet.absoluteFill} />
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Custom shoot type</Text>
-            <Text style={styles.modalSub}>AI will adapt the storyboard to your idea.</Text>
+            <Text style={styles.modalTitle}>{t('custom_shoot_type')}</Text>
+            <Text style={styles.modalSub}>{t('custom_shoot_help')}</Text>
             <View style={[styles.input, { marginTop: 16 }]}>
               <TextInput
                 value={customName}
                 onChangeText={setCustomName}
-                placeholder="Ex: Birthday Party, Bike Ride, College Fest"
+                placeholder={t('custom_shoot_example')}
                 placeholderTextColor={theme.color.onSurface3}
                 autoFocus
                 style={styles.text}
@@ -188,10 +199,10 @@ export default function NewProject() {
             </View>
             <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
               <Pressable style={styles.modalGhost} onPress={() => { setCustomOpen(false); setCustomName(''); }} testID="custom-shoot-cancel">
-                <Text style={styles.modalGhostText}>Cancel</Text>
+                <Text style={styles.modalGhostText}>{t('cancel')}</Text>
               </Pressable>
               <Pressable style={styles.modalPrimary} onPress={addCustom} testID="custom-shoot-save">
-                <Text style={styles.modalPrimaryText}>Add</Text>
+                <Text style={styles.modalPrimaryText}>{t('add')}</Text>
               </Pressable>
             </View>
           </View>
@@ -207,6 +218,9 @@ const styles = StyleSheet.create({
   title: { flex: 1, textAlign: 'center', color: theme.color.onSurface, fontSize: 17, fontWeight: '700' },
   label: { color: theme.color.onSurface2, fontSize: 13, marginTop: 20, marginBottom: 10, letterSpacing: 0.3, textTransform: 'uppercase' },
   input: { backgroundColor: theme.color.surface3, borderRadius: theme.radius.md, paddingHorizontal: 16, height: 56, justifyContent: 'center', borderWidth: 1, borderColor: theme.color.border },
+  purposeInput: { height: 136, justifyContent: 'flex-start' },
+  purposeText: { minHeight: 112, paddingVertical: 12 },
+  helper: { color: theme.color.onSurface3, fontSize: 12, lineHeight: 17, marginTop: 7 },
   text: { color: theme.color.onSurface, fontSize: 16 },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: {

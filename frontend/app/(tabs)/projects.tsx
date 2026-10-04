@@ -9,8 +9,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api } from '@/src/api';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 export default function Projects() {
+  const t = useT();
   const router = useRouter();
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -27,7 +29,7 @@ export default function Projects() {
     <View style={styles.root} testID="projects-screen">
       <SafeAreaView edges={['top']} style={{ flex: 1 }}>
         <View style={styles.header}>
-          <Text style={styles.title}>Projects</Text>
+          <Text style={styles.title}>{t('all_projects')}</Text>
           <Pressable style={styles.newBtn} onPress={() => router.push('/project/new')} testID="projects-new-button">
             <Ionicons name="add" size={20} color="#fff" />
           </Pressable>
@@ -37,7 +39,7 @@ export default function Projects() {
         ) : items.length === 0 ? (
           <View style={styles.empty}>
             <Ionicons name="albums-outline" size={44} color={theme.color.onSurface3} />
-            <Text style={styles.emptyText}>No projects yet. Tap + to create one.</Text>
+            <Text style={styles.emptyText}>{t('no_projects')}</Text>
           </View>
         ) : (
           <FlatList
@@ -59,7 +61,7 @@ export default function Projects() {
                   <Text style={styles.name} numberOfLines={1}>{item.title}</Text>
                   <Text style={styles.meta}>{item.shoot_type} · {item.duration_seconds}s · {item.style}</Text>
                   <View style={styles.badge}>
-                    <Text style={styles.badgeText}>{item.status}</Text>
+                    <Text style={styles.badgeText}>{t(`project_status_${item.status}`)}</Text>
                   </View>
                 </View>
                 <Ionicons name="chevron-forward" size={20} color={theme.color.onSurface3} />

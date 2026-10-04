@@ -1,6 +1,6 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
@@ -10,15 +10,22 @@ import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 
 import { api } from '@/src/api';
+import { useT } from '@/src/i18n';
 import { theme } from '@/src/theme';
 
 export default function Scan() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id } = useLocalSearchParams<{ id: string; flow?: string }>();
   const router = useRouter();
+  const t = useT();
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
   const [scanning, setScanning] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [result, setResult] = useState<any>(null);
+  const [project, setProject] = useState<any>(null);
+  const [scanError, setScanError] = useState('');
+
+  useEffect(() => { if (id) api.getProject(id).then(setProject).catch(() => {}); }, [id]);
 
   const doScan = async () => {
     if (!cameraRef.current) return;
@@ -27,24 +34,47 @@ export default function Scan() {
     try {
       const photo = await cameraRef.current.takePictureAsync({ base64: true, quality: 0.5, skipProcessing: true });
       if (!photo?.base64) throw new Error('no image');
-      const r = await api.scan(photo.base64);
+      const r = await api.scan(id!, photo.base64);
       setResult(r);
+      setScanError('');
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     } catch (e) {
       console.warn(e);
+      setScanError(e instanceof Error ? e.message : 'Could not analyze this scene. Try again.');
     } finally { setScanning(false); }
   };
+
+  const continueFromScan = async () => {
+    if (!id) return;
+    const hasRecordedClips = (project?.clips || []).length > 0;
+    if (project?.storyboard?.length && hasRecordedClips) {
+      router.replace({ pathname: '/project/[id]/camera', params: { id, shot: '0' } });
+      return;
+    }
+    setGenerating(true);
+    setScanError('');
+    try {
+      await api.storyboard(id);
+      router.replace(`/project/${id}`);
+    } catch (error: any) {
+      setScanError(error?.message || 'Could not write the custom script. Try again.');
+    } finally { setGenerating(false); }
+  };
+
+  const skipScan = () => router.replace(`/project/${id}`);
 
   if (!permission) return <View style={styles.root} />;
   if (!permission.granted) {
     return (
       <View style={[styles.root, styles.center]} testID="scan-permission-screen">
         <Ionicons name="camera-outline" size={48} color={theme.color.onSurface2} />
-        <Text style={styles.permTitle}>Camera access needed</Text>
-        <Text style={styles.permSub}>To scan the scene and give AI direction.</Text>
+        <Text style={styles.permTitle}>{t('camera_access_needed')}</Text>
+        <Text style={styles.permSub}>{t('scan_permission')}</Text>
+        {!!scanError && <Text style={styles.error}>{scanError}</Text>}
         <Pressable style={styles.permBtn} onPress={requestPermission} testID="scan-grant-permission">
-          <Text style={styles.permBtnText}>Grant access</Text>
+          <Text style={styles.permBtnText}>{t('grant_access')}</Text>
         </Pressable>
+        <Pressable onPress={skipScan} testID="scan-skip-permission"><Text style={styles.skipText}>{t('skip_scan')}</Text></Pressable>
       </View>
     );
   }
@@ -59,7 +89,7 @@ export default function Scan() {
           </Pressable>
           <View style={styles.topLabel}>
             <BlurView tint="dark" intensity={40} style={StyleSheet.absoluteFill} />
-            <Text style={styles.topLabelText}>AI Environment Scan</Text>
+            <Text style={styles.topLabelText}>{t('environment_scan')}</Text>
           </View>
           <View style={{ width: 40 }} />
         </View>
@@ -76,15 +106,16 @@ export default function Scan() {
             <View style={styles.resultSheet}>
               <BlurView tint="dark" intensity={60} style={StyleSheet.absoluteFill} />
               <View style={{ padding: 20 }}>
-                <Text style={styles.resTitle}>Scene analyzed</Text>
+                <Text style={styles.resTitle}>{t('scene_analyzed')}</Text>
+                {!project?.storyboard?.length && <Text style={styles.scanExplain}>{t('scan_explainer')}</Text>}
                 <Text style={styles.resSummary}>{result.summary}</Text>
 
                 <View style={styles.scores}>
-                  <ScoreBar label="Lighting" value={result.lighting_quality_score} />
-                  <ScoreBar label="Composition" value={result.composition_score} />
+                  <ScoreBar label={t('lighting')} value={result.lighting_quality_score} />
+                  <ScoreBar label={t('composition')} value={result.composition_score} />
                 </View>
 
-                <Text style={styles.resSection}>Suggested shots</Text>
+                <Text style={styles.resSection}>{t('suggested_shots')}</Text>
                 <ScrollView style={{ maxHeight: 100 }}>
                   {(result.suggested_shots || []).map((s: string, i: number) => (
                     <Text key={i} style={styles.tip}>• {s}</Text>
@@ -93,15 +124,19 @@ export default function Scan() {
 
                 <View style={styles.resButtons}>
                   <Pressable style={styles.resGhost} onPress={() => setResult(null)} testID="scan-rescan">
-                    <Text style={styles.resGhostText}>Scan again</Text>
+                    <Text style={styles.resGhostText}>{t('scan_again')}</Text>
                   </Pressable>
                   <Pressable style={styles.resPrimary}
-                    onPress={() => router.replace({ pathname: '/project/[id]/camera', params: { id: id!, shot: '0' } })}
-                    testID="scan-start-shooting">
-                    <Text style={styles.resPrimaryText}>Start shooting</Text>
-                    <Ionicons name="arrow-forward" size={16} color="#fff" />
+                    onPress={() => void continueFromScan()}
+                    disabled={generating}
+                    testID="scan-continue">
+                    {generating ? <ActivityIndicator color="#fff" /> : <Text style={styles.resPrimaryText}>
+                      {project?.storyboard?.length && (project?.clips || []).length > 0 ? t('start_shooting') : t('generate_script')}
+                    </Text>}
+                    {!generating && <Ionicons name="arrow-forward" size={16} color="#fff" />}
                   </Pressable>
                 </View>
+                {!!scanError && <Text style={styles.error}>{scanError}</Text>}
               </View>
             </View>
           ) : (
@@ -109,16 +144,19 @@ export default function Scan() {
               {scanning ? (
                 <>
                   <ActivityIndicator color="#fff" />
-                  <Text style={styles.scanBtnText}>Analyzing…</Text>
+                  <Text style={styles.scanBtnText}>{t('analyzing_scene')}</Text>
                 </>
               ) : (
                 <>
                   <Ionicons name="scan" size={22} color="#fff" />
-                  <Text style={styles.scanBtnText}>Scan scene</Text>
+                  <Text style={styles.scanBtnText}>{t('scan_scene')}</Text>
                 </>
               )}
             </Pressable>
           )}
+          {!result && <Text style={styles.scanIntro}>{t('scan_explainer')}</Text>}
+          {!!scanError && !result && <Text style={styles.error}>{scanError}</Text>}
+          {!result && <Pressable onPress={skipScan} testID="scan-skip"><Text style={styles.skipText}>{t('skip_scan')}</Text></Pressable>}
         </View>
       </SafeAreaView>
     </View>
@@ -147,6 +185,10 @@ const styles = StyleSheet.create({
   permSub: { color: theme.color.onSurface2, textAlign: 'center' },
   permBtn: { marginTop: 20, backgroundColor: theme.color.brand, paddingHorizontal: 20, height: 48, borderRadius: theme.radius.md, alignItems: 'center', justifyContent: 'center' },
   permBtnText: { color: '#fff', fontWeight: '700' },
+  scanIntro: { color: 'rgba(255,255,255,0.75)', fontSize: 12, textAlign: 'center', marginTop: 10, marginHorizontal: 20 },
+  scanExplain: { color: 'rgba(255,255,255,0.72)', fontSize: 12, lineHeight: 17, marginTop: 6 },
+  skipText: { color: 'rgba(255,255,255,0.78)', fontSize: 13, fontWeight: '600', textAlign: 'center', paddingVertical: 10 },
+  error: { color: '#fff', backgroundColor: 'rgba(180,30,60,0.85)', paddingHorizontal: 12, paddingVertical: 8, borderRadius: theme.radius.md, textAlign: 'center', marginTop: 10 },
   topBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingTop: 8, gap: 12 },
   iconBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
   topLabel: { flex: 1, height: 40, borderRadius: theme.radius.pill, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },

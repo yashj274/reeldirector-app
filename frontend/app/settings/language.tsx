@@ -4,10 +4,11 @@ import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { LANGUAGES, getLanguage, setLanguage } from '@/src/i18n';
+import { LANGUAGES, getLanguage, setLanguage, useT } from '@/src/i18n';
 import { theme } from '@/src/theme';
 
 export default function SettingsLanguage() {
+  const t = useT();
   const router = useRouter();
   const [sel, setSel] = useState<string>('en');
   useEffect(() => { getLanguage().then(setSel); }, []);
@@ -24,7 +25,7 @@ export default function SettingsLanguage() {
           <Pressable onPress={() => router.back()} testID="settings-language-back">
             <Ionicons name="chevron-back" size={26} color={theme.color.onSurface} />
           </Pressable>
-          <Text style={styles.title}>Language</Text>
+          <Text style={styles.title}>{t('language')}</Text>
           <View style={{ width: 26 }} />
         </View>
         <FlatList

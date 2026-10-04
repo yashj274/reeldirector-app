@@ -10,8 +10,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api, friendlyAuthError } from '@/src/api';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 export default function Signup() {
+  const t = useT();
   const router = useRouter();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -47,22 +49,22 @@ export default function Signup() {
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <ScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end', padding: 24 }}>
             <Text style={styles.brand}>ReelDirector</Text>
-            <Text style={styles.title}>Create account</Text>
-            <Text style={styles.sub}>Your first reel is 60 seconds away.</Text>
+            <Text style={styles.title}>{t('create_account_title')}</Text>
+            <Text style={styles.sub}>{t('signup_subtitle')}</Text>
 
             <View style={styles.input}>
-              <TextInput value={name} onChangeText={setName} placeholder="Full name"
+              <TextInput value={name} onChangeText={setName} placeholder={t('full_name')}
                 placeholderTextColor={theme.color.onSurface3} style={styles.text}
                 testID="signup-name-input" />
             </View>
             <View style={styles.input}>
-              <TextInput value={email} onChangeText={setEmail} placeholder="Email"
+              <TextInput value={email} onChangeText={setEmail} placeholder={t('email')}
                 placeholderTextColor={theme.color.onSurface3} autoCapitalize="none"
                 keyboardType="email-address" style={styles.text}
                 testID="signup-email-input" />
             </View>
             <View style={styles.input}>
-              <TextInput value={password} onChangeText={setPassword} placeholder="Password (6+)"
+              <TextInput value={password} onChangeText={setPassword} placeholder={`${t('password')} (6+)`}
                 placeholderTextColor={theme.color.onSurface3} secureTextEntry style={styles.text}
                 testID="signup-password-input" />
             </View>
@@ -71,11 +73,11 @@ export default function Signup() {
             {info && <Text style={styles.info} testID="signup-info">{info}</Text>}
 
             <Pressable style={styles.primary} onPress={submit} disabled={busy} testID="signup-submit-button">
-              {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryText}>Create account</Text>}
+              {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryText}>{t('create_account')}</Text>}
             </Pressable>
 
             <Pressable onPress={() => router.replace('/(auth)/login')} testID="signup-goto-login">
-              <Text style={styles.link}>Have an account? <Text style={{ color: theme.color.brand }}>Sign in</Text></Text>
+              <Text style={styles.link}>{t('have_account')} <Text style={{ color: theme.color.brand }}>{t('sign_in')}</Text></Text>
             </Pressable>
           </ScrollView>
         </KeyboardAvoidingView>

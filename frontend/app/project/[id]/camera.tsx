@@ -13,6 +13,8 @@ import * as Haptics from 'expo-haptics';
 import { api } from '@/src/api';
 import { theme } from '@/src/theme';
 import { ClipVideoPreview } from '@/src/ClipVideoPreview';
+import { MovementGuide } from '@/src/MovementGuide';
+import { useT } from '@/src/i18n';
 
 type Mode = 'video' | 'cinematic';
 type RecordedVideo = { uri?: string; blob?: Blob; mimeType?: string };
@@ -73,6 +75,7 @@ const MODES: { id: Mode; label: string; icon: keyof typeof Ionicons.glyphMap }[]
 ];
 
 export default function DirectorCamera() {
+  const t = useT();
   const { id, shot } = useLocalSearchParams<{ id: string; shot?: string }>();
   const router = useRouter();
   const [permission, requestPermission] = useCameraPermissions();
@@ -106,6 +109,7 @@ export default function DirectorCamera() {
   const [flash, setFlash] = useState<'off' | 'on'>('off');
   const [zoom, setZoom] = useState(0);
   const [grid, setGrid] = useState(true);
+  const [brightness, setBrightness] = useState(0);
 
   useEffect(() => {
     if (!id) return;
@@ -129,6 +133,7 @@ export default function DirectorCamera() {
     setWebStream(nextStream);
     setCameraReady(false);
     previousStream?.getTracks().forEach((track) => track.stop());
+    setFlash('off');
     setCameraError(null);
   }, [facing]);
 
@@ -150,7 +155,7 @@ export default function DirectorCamera() {
           const mimeType = file.type || (file.name.toLowerCase().endsWith('.mov') ? 'video/quicktime' : 'video/mp4');
           const result = await api.clipQuality(id, shotIndex, frame.frameBase64, frame.durationSeconds, {
             blob: file, mimeType,
-          });
+          }, brightness);
           setQuality(result);
           setProject(await api.getProject(id));
         } catch (error: any) {
@@ -162,7 +167,7 @@ export default function DirectorCamera() {
       })();
     };
     input.click();
-  }, [id, shotIndex]);
+  }, [id, shotIndex, brightness]);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || !webStream || !webVideoRef.current) return;
@@ -229,6 +234,38 @@ export default function DirectorCamera() {
   }, [cameraReady, requestDirection]);
 
   const targetDur = shotObj?.duration_seconds || 3;
+
+  useEffect(() => {
+    const previous = (project?.clips || []).find((clip: any) => clip.shot_index === shotIndex);
+    setBrightness(Math.max(-0.5, Math.min(0.5, Number(previous?.brightness) || 0)));
+  }, [project?.clips, shotIndex]);
+
+  const toggleFlash = async () => {
+    if (flash === 'on') {
+      if (Platform.OS === 'web') {
+        const track = webStreamRef.current?.getVideoTracks()[0];
+        try { await track?.applyConstraints({ advanced: [{ torch: false }] } as any); } catch { /* best effort */ }
+      }
+      setFlash('off');
+      return;
+    }
+    if (Platform.OS === 'web') {
+      const track = webStreamRef.current?.getVideoTracks()[0] as (MediaStreamTrack & { getCapabilities?: () => any }) | undefined;
+      if (!track || (track as any).getCapabilities?.()?.torch !== true) {
+        setCameraError(t('camera_movement_unavailable'));
+        return;
+      }
+      try {
+        await track.applyConstraints({ advanced: [{ torch: true }] } as any);
+        setCameraError(null);
+        setFlash('on');
+      } catch {
+        setCameraError(t('camera_movement_unavailable'));
+      }
+      return;
+    }
+    setFlash('on');
+  };
 
   const startTimer = () => {
     clipStart.current = Date.now();
@@ -333,7 +370,7 @@ export default function DirectorCamera() {
       if (id) {
         const q = await api.clipQuality(id, shotIndex, frameBase64, dur, {
           uri: recorded.uri, blob: recorded.blob, mimeType: recorded.mimeType,
-        });
+        }, brightness);
         setQuality(q);
         setProject(await api.getProject(id));
       }
@@ -382,10 +419,10 @@ export default function DirectorCamera() {
     return (
       <View style={[styles.root, styles.center]} testID="camera-permission-screen">
         <Ionicons name="videocam-outline" size={48} color={theme.color.onSurface2} />
-        <Text style={styles.permTitle}>Camera and microphone access needed</Text>
+        <Text style={styles.permTitle}>{t('camera_mic_title')}</Text>
         <Text style={styles.permSub}>{webCameraNeedsHttps
-          ? 'This local link cannot open a live camera. Use the button below to record with your phone camera or choose a saved clip.'
-          : 'Allow both so ReelDirector can show shot guidance and record video with sound.'}</Text>
+          ? t('camera_https_copy')
+          : t('camera_permission_copy')}</Text>
         {cameraError && <Text style={styles.cameraError}>{cameraError}</Text>}
         {analyzing && <ActivityIndicator color={theme.color.brand} />}
         <Pressable style={[styles.permBtn, analyzing && { opacity: 0.5 }]} disabled={analyzing} onPress={async () => {
@@ -402,12 +439,12 @@ export default function DirectorCamera() {
           if (!micPermission?.granted) await requestMicPermission();
         }} testID="camera-grant-permission">
           <Text style={styles.permBtnText}>{Platform.OS !== 'web'
-            ? 'Grant access' : webCameraNeedsHttps ? 'Record or choose a video' : 'Open live camera'}</Text>
+            ? t('grant_access') : webCameraNeedsHttps ? t('record_or_choose_video') : t('open_live_camera')}</Text>
         </Pressable>
         {Platform.OS === 'web' && !webCameraNeedsHttps && (
           <Pressable style={[styles.permBtn, styles.permBtnSecondary, analyzing && { opacity: 0.5 }]}
             disabled={analyzing} onPress={choosePhoneVideo} testID="camera-choose-phone-video">
-            <Text style={styles.permBtnText}>Record or choose a video</Text>
+            <Text style={styles.permBtnText}>{t('record_or_choose_video')}</Text>
           </Pressable>
         )}
       </View>
@@ -436,15 +473,16 @@ export default function DirectorCamera() {
           autoPlay: true,
           muted: true,
           playsInline: true,
-          'aria-label': 'Live camera preview',
+          'aria-label': t('live_camera'),
           style: {
             position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
             transform: facing === 'front' ? 'scaleX(-1)' : undefined,
+            filter: `brightness(${Math.max(0.5, Math.min(1.5, 1 + brightness))})`,
           },
         }) : (
           <View style={[StyleSheet.absoluteFill, styles.videoFilePreview]}>
             <Ionicons name="videocam-outline" size={44} color={theme.color.onSurface2} />
-            <Text style={styles.videoFilePreviewText}>Phone camera clip ready</Text>
+            <Text style={styles.videoFilePreviewText}>{t('phone_camera_clip_ready')}</Text>
           </View>
         )
         : <CameraView
@@ -460,6 +498,9 @@ export default function DirectorCamera() {
           zoom={zoom}
           enableTorch={flash === 'on' && facing === 'back'}
         />}
+      {Platform.OS !== 'web' && brightness !== 0 && (
+        <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: brightness > 0 ? '#fff' : '#000', opacity: Math.min(0.5, Math.abs(brightness)) }]} />
+      )}
       {grid && (
         <>
           <View style={styles.gridV} pointerEvents="none" />
@@ -476,7 +517,7 @@ export default function DirectorCamera() {
           </Pressable>
           <View style={styles.shotPill}>
             <BlurView tint="dark" intensity={50} style={StyleSheet.absoluteFill} />
-            <Text style={styles.shotPillLabel}>SHOT {shotIndex + 1}/{project?.storyboard?.length || '-'}</Text>
+            <Text style={styles.shotPillLabel}>{t('shot_counter').replace('{current}', String(shotIndex + 1)).replace('{total}', String(project?.storyboard?.length || '-'))}</Text>
             <Text style={styles.shotPillTitle} numberOfLines={1}>{shotObj?.title || ''}</Text>
           </View>
           <View style={{ width: 40 }} />
@@ -496,13 +537,15 @@ export default function DirectorCamera() {
           </View>
         )}
 
+        {!quality && !!shotObj?.camera_movement && <MovementGuide movement={shotObj.camera_movement} label={t('move_guide')} movementLabel={t(`move_${String(shotObj.camera_movement).toLowerCase().replace(/\s+/g, '_')}`)} />}
+
         {/* Right-side quick controls */}
         {!quality && !recording && (
           <View style={styles.sideCol}>
-            <IconChip on={grid} icon="grid-outline" onPress={() => setGrid((v) => !v)} testID="cam-grid" />
-            {Platform.OS !== 'web' && <IconChip icon={flash === 'on' ? 'flash' : 'flash-off'} on={flash !== 'off'}
-              onPress={() => setFlash((v) => v === 'off' ? 'on' : 'off')} testID="cam-flash" />}
-            <IconChip icon={facing === 'back' ? 'camera-reverse-outline' : 'camera-reverse'} on={false}
+            <IconChip label={t('grid')} on={grid} icon="grid-outline" onPress={() => setGrid((v) => !v)} testID="cam-grid" />
+            <IconChip icon={flash === 'on' ? 'flash' : 'flash-off'} on={flash !== 'off'}
+              label={t('flashlight')} onPress={() => void toggleFlash()} testID="cam-flash" />
+            <IconChip icon={facing === 'back' ? 'camera-reverse-outline' : 'camera-reverse'} label={t('flip_camera')} on={false}
               onPress={() => {
                 const nextFacing = facing === 'back' ? 'front' : 'back';
                 setFacing(nextFacing);
@@ -539,31 +582,36 @@ export default function DirectorCamera() {
                   </View>
                 )}
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.qTitle}>{quality.review_available === false ? 'Clip saved' : quality.recommendation === 'keep' ? 'Great shot!' : quality.recommendation === 'retake_optional' ? 'Retake suggested' : 'Retake required'}</Text>
-                  <Text style={styles.qReason} numberOfLines={2}>{quality.reason}</Text>
+                  <Text style={styles.qTitle}>{quality.review_available === false ? t('clip_saved') : quality.recommendation === 'keep' ? t('great_shot') : quality.recommendation === 'retake_optional' ? t('retake_suggested') : t('retake_required')}</Text>
+                  <Text style={styles.qReason} numberOfLines={2}>{quality.review_available === false ? t('rating_unavailable') : quality.reason}</Text>
                 </View>
               </View>
 
               {quality.review_available !== false && <View style={styles.qGrid}>
-                <QSlot label="Blur" v={quality.blur_score} />
-                <QSlot label="Exposure" v={quality.exposure_score} />
-                <QSlot label="Framing" v={quality.composition_score} />
-                <QSlot label="Stability" v={quality.stability_score} />
+                <QSlot label={t('blur')} v={quality.blur_score} />
+                <QSlot label={t('exposure')} v={quality.exposure_score} />
+                <QSlot label={t('framing')} v={quality.composition_score} />
+                <QSlot label={t('stability')} v={quality.stability_score} />
               </View>}
+              {!!quality.issues?.length && quality.review_available !== false && (
+                <View style={styles.issuesList}>
+                  {quality.issues.slice(0, 3).map((issue: string, index: number) => <Text key={`${index}-${issue}`} style={styles.qIssue}>• {issue}</Text>)}
+                </View>
+              )}
 
               {(() => {
                 const reviewedClip = (project?.clips || []).find((clip: any) => clip.shot_index === shotIndex);
                 return reviewedClip ? (
                   <View style={styles.recordedPreview}>
-                    <Text style={styles.previewLabel}>Your shot · watch it back</Text>
-                    <ClipVideoPreview uri={reviewedClip.video_url} posterUri={reviewedClip.frame_url} height={200} />
+                    <Text style={styles.previewLabel}>{t('your_shot')}</Text>
+                    <ClipVideoPreview uri={reviewedClip.video_url} posterUri={reviewedClip.frame_url} height={200} brightness={reviewedClip.brightness || 0} />
                     <Pressable
                       style={styles.editClipLink}
                       onPress={() => router.push({ pathname: '/project/[id]/export', params: { id: id!, clip: String(shotIndex) } })}
                       testID="camera-edit-clip"
                     >
                       <Ionicons name="options-outline" size={16} color="#fff" />
-                      <Text style={styles.editClipText}>Edit filters, text & trim</Text>
+                    <Text style={styles.editClipText}>{t('edit_filters_text_trim')}</Text>
                     </Pressable>
                   </View>
                 ) : null;
@@ -571,10 +619,10 @@ export default function DirectorCamera() {
 
               <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
                 <Pressable style={styles.ghost} onPress={retake} testID="camera-retake">
-                  <Text style={styles.ghostText}>Retake</Text>
+                  <Text style={styles.ghostText}>{t('retake')}</Text>
                 </Pressable>
                 <Pressable style={styles.primary} onPress={nextShot} testID="camera-next">
-                  <Text style={styles.primaryText}>{shotIndex + 1 < (project?.storyboard?.length || 0) ? 'Next shot' : 'Finish & edit'}</Text>
+                  <Text style={styles.primaryText}>{shotIndex + 1 < (project?.storyboard?.length || 0) ? t('next_shot') : t('finish_edit')}</Text>
                   <Ionicons name="arrow-forward" size={16} color="#fff" />
                 </Pressable>
               </View>
@@ -586,21 +634,32 @@ export default function DirectorCamera() {
               <View style={styles.analyzing}>
                 <BlurView tint="dark" intensity={50} style={StyleSheet.absoluteFill} />
                 <ActivityIndicator color={theme.color.brand} />
-                <Text style={styles.analyzingText}>Checking a frame from your clip…</Text>
+                <Text style={styles.analyzingText}>{t('checking_clip_frame')}</Text>
               </View>
             ) : (
               <>
                 {/* Mode selector */}
+                <View style={styles.brightnessRow}>
+                  <Ionicons name="sunny-outline" size={17} color="#fff" />
+                  <Text style={styles.brightnessLabel}>{t('brightness')}</Text>
+                  <Pressable accessibilityLabel="Decrease brightness" onPress={() => setBrightness((v) => Math.max(-0.5, Math.round((v - 0.05) * 100) / 100))} style={styles.brightnessButton} testID="cam-brightness-down">
+                    <Ionicons name="remove" size={17} color="#fff" />
+                  </Pressable>
+                  <Text style={styles.brightnessValue}>{Math.round(brightness * 100)}%</Text>
+                  <Pressable accessibilityLabel="Increase brightness" onPress={() => setBrightness((v) => Math.min(0.5, Math.round((v + 0.05) * 100) / 100))} style={styles.brightnessButton} testID="cam-brightness-up">
+                    <Ionicons name="add" size={17} color="#fff" />
+                  </Pressable>
+                </View>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, gap: 8 }} style={{ maxHeight: 40 }}>
                   {MODES.filter((m) => Platform.OS !== 'web' || m.id === 'video').map((m) => (
                     <Pressable key={m.id} onPress={() => setMode(m.id)} style={[styles.modeChip, mode === m.id && styles.modeChipOn]} testID={`cam-mode-${m.id}`}>
                       <Ionicons name={m.icon} size={13} color={mode === m.id ? theme.color.brand : '#fff'} />
-                      <Text style={[styles.modeText, mode === m.id && { color: theme.color.brand }]}>{m.label}</Text>
+                      <Text style={[styles.modeText, mode === m.id && { color: theme.color.brand }]}>{t(m.id === 'video' ? 'video_mode' : 'stabilized_mode')}</Text>
                     </Pressable>
                   ))}
                 </ScrollView>
 
-                <Text style={styles.timer}>{recording ? `${recSeconds.toFixed(1)}s / ${targetDur.toFixed(1)}s` : `${MODES.find((m) => m.id === mode)?.label}  ·  ${targetDur.toFixed(1)}s`}</Text>
+                <Text style={styles.timer}>{recording ? `${recSeconds.toFixed(1)}s / ${targetDur.toFixed(1)}s` : `${t(mode === 'video' ? 'video_mode' : 'stabilized_mode')}  ·  ${targetDur.toFixed(1)}s`}</Text>
                 {cameraError && <Text style={styles.cameraError}>{cameraError}</Text>}
                 <Pressable
                   onPress={recording ? stopRec : startRec}
@@ -634,9 +693,9 @@ function QSlot({ label, v }: { label: string; v: number }) {
   );
 }
 
-function IconChip({ icon, on, onPress, testID }: { icon: keyof typeof Ionicons.glyphMap; on: boolean; onPress: () => void; testID: string }) {
+function IconChip({ icon, on, onPress, testID, label }: { icon: keyof typeof Ionicons.glyphMap; on: boolean; onPress: () => void; testID: string; label?: string }) {
   return (
-    <Pressable style={[styles.iconChip, on && styles.iconChipOn]} onPress={onPress} testID={testID}>
+    <Pressable style={[styles.iconChip, on && styles.iconChipOn]} onPress={onPress} testID={testID} accessibilityLabel={label}>
       <BlurView tint="dark" intensity={40} style={StyleSheet.absoluteFill} />
       <Ionicons name={icon} size={18} color={on ? theme.color.brand : '#fff'} />
     </Pressable>
@@ -679,6 +738,8 @@ const styles = StyleSheet.create({
   qBadgeText: { color: '#fff', fontWeight: '800', fontSize: 16 },
   qTitle: { color: '#fff', fontSize: 17, fontWeight: '700' },
   qReason: { color: 'rgba(255,255,255,0.8)', fontSize: 13, marginTop: 2 },
+  issuesList: { marginTop: 8, gap: 3 },
+  qIssue: { color: 'rgba(255,255,255,0.84)', fontSize: 12 },
   qGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginTop: 16 },
   qLabel: { color: 'rgba(255,255,255,0.8)', fontSize: 11, fontWeight: '600' },
   qVal: { color: '#fff', fontSize: 11, fontWeight: '700' },
@@ -699,6 +760,10 @@ const styles = StyleSheet.create({
   zoomChip: { paddingHorizontal: 12, height: 32, borderRadius: theme.radius.pill, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' },
   zoomChipOn: { backgroundColor: theme.color.brandTint, borderWidth: 1, borderColor: theme.color.brand },
   zoomText: { color: '#fff', fontWeight: '700', fontSize: 12 },
+  brightnessRow: { minHeight: 34, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, paddingHorizontal: 12, borderRadius: theme.radius.pill, backgroundColor: 'rgba(0,0,0,0.58)' },
+  brightnessLabel: { color: '#fff', fontSize: 12, fontWeight: '700', marginRight: 4 },
+  brightnessButton: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.16)' },
+  brightnessValue: { color: '#fff', minWidth: 36, textAlign: 'center', fontSize: 12, fontWeight: '700' },
   modeChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, height: 32, borderRadius: theme.radius.pill, backgroundColor: 'rgba(0,0,0,0.55)', flexShrink: 0 },
   modeChipOn: { backgroundColor: theme.color.brandTint, borderWidth: 1, borderColor: theme.color.brand },
   modeText: { color: '#fff', fontSize: 12, fontWeight: '700' },

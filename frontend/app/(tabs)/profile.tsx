@@ -6,8 +6,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { clearAuth, getUser } from '@/src/api';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 export default function Profile() {
+  const t = useT();
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
 
@@ -30,7 +32,7 @@ export default function Profile() {
     <View style={styles.root} testID="profile-screen">
       <SafeAreaView edges={['top']} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 140 }}>
-          <Text style={styles.title}>Profile</Text>
+          <Text style={styles.title}>{t('profile')}</Text>
 
           <View style={styles.card}>
             <View style={styles.avatar}>
@@ -43,28 +45,28 @@ export default function Profile() {
             </View>
           </View>
 
-          <Text style={styles.section}>Preferences</Text>
+          <Text style={styles.section}>{t('preferences')}</Text>
           <View style={styles.list}>
-            {row('language-outline', 'Language', 'profile-language', () => router.push('/settings/language'))}
-            {row('color-palette-outline', 'Editing style', 'profile-editing-style')}
+            {row('language-outline', t('language'), 'profile-language', () => router.push('/settings/language'))}
+            {row('color-palette-outline', t('editing_style'), 'profile-editing-style')}
           </View>
 
-          <Text style={styles.section}>Account</Text>
+          <Text style={styles.section}>{t('account')}</Text>
           <View style={styles.list}>
-            {row('card-outline', 'Subscription', 'profile-subscription')}
-            {row('cloud-download-outline', 'Downloads', 'profile-downloads')}
-            {row('notifications-outline', 'Notifications', 'profile-notifications')}
+            {row('card-outline', t('subscription'), 'profile-subscription')}
+            {row('cloud-download-outline', t('downloads'), 'profile-downloads')}
+            {row('notifications-outline', t('notifications'), 'profile-notifications')}
           </View>
 
-          <Text style={styles.section}>Support</Text>
+          <Text style={styles.section}>{t('support')}</Text>
           <View style={styles.list}>
-            {row('help-circle-outline', 'Help & FAQ', 'profile-help')}
-            {row('chatbubble-outline', 'Send Feedback', 'profile-feedback')}
-            {row('shield-checkmark-outline', 'Privacy', 'profile-privacy')}
+            {row('help-circle-outline', t('help_faq'), 'profile-help')}
+            {row('chatbubble-outline', t('send_feedback'), 'profile-feedback')}
+            {row('shield-checkmark-outline', t('privacy'), 'profile-privacy')}
           </View>
 
           <Pressable style={styles.logout} onPress={logout} testID="profile-logout-button">
-            <Text style={styles.logoutText}>Log out</Text>
+            <Text style={styles.logoutText}>{t('log_out')}</Text>
           </Pressable>
         </ScrollView>
       </SafeAreaView>

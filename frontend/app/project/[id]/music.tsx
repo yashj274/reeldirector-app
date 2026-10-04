@@ -10,8 +10,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api } from '@/src/api';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 export default function MusicPicker() {
+  const t = useT();
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const player = useAudioPlayer(null);
@@ -102,7 +104,7 @@ export default function MusicPicker() {
           <Pressable onPress={() => router.back()} testID="music-back">
             <Ionicons name="chevron-back" size={26} color={theme.color.onSurface} />
           </Pressable>
-          <Text style={styles.title}>Soundtrack</Text>
+          <Text style={styles.title}>{t('soundtrack')}</Text>
           <View style={{ width: 26 }} />
         </View>
 
@@ -111,19 +113,19 @@ export default function MusicPicker() {
             <View style={styles.musicIcon}>
               <Ionicons name="musical-notes" size={25} color={theme.color.brand} />
             </View>
-            <Text style={styles.heading}>{trackName || 'Use your own audio'}</Text>
+            <Text style={styles.heading}>{trackName || t('use_your_audio')}</Text>
             <Text style={styles.subheading}>
-              {trackName ? 'Your music will be mixed with the sound recorded by the camera.' : 'Import an audio file to mix it with your recorded clips.'}
+              {trackName ? t('current_music_mix') : t('import_audio_mix')}
             </Text>
             {trackName ? (
               <View style={styles.trackActions}>
                 <Pressable style={styles.outlineButton} onPress={togglePreview} testID="music-preview">
                   <Ionicons name={previewing ? 'pause' : 'play'} size={17} color={theme.color.onSurface} />
-                  <Text style={styles.outlineText}>{previewing ? 'Pause preview' : 'Preview'}</Text>
+                  <Text style={styles.outlineText}>{previewing ? t('pause_preview') : t('preview')}</Text>
                 </Pressable>
                 <Pressable style={styles.outlineButton} onPress={() => { setPickedFile(null); setRemoveTrack(true); }} testID="music-remove">
                   <Ionicons name="trash-outline" size={17} color={theme.color.error} />
-                  <Text style={[styles.outlineText, { color: theme.color.error }]}>Remove</Text>
+                  <Text style={[styles.outlineText, { color: theme.color.error }]}>{t('remove')}</Text>
                 </Pressable>
               </View>
             ) : null}
@@ -131,10 +133,10 @@ export default function MusicPicker() {
 
           <Pressable style={styles.chooseButton} onPress={chooseTrack} testID="music-choose-file">
             <Ionicons name="folder-open-outline" size={20} color={theme.color.brand} />
-            <Text style={styles.chooseText}>{trackName ? 'Choose a different audio file' : 'Choose audio file'}</Text>
+            <Text style={styles.chooseText}>{trackName ? t('choose_different_audio') : t('choose_audio_file')}</Text>
           </Pressable>
 
-          <Text style={styles.note}>Supports common audio files up to 25 MB. Camera audio remains in the final video.</Text>
+          <Text style={styles.note}>{t('audio_file_note')}</Text>
           {!!error && <Text style={styles.error} accessibilityRole="alert">{error}</Text>}
         </View>
 
@@ -148,7 +150,7 @@ export default function MusicPicker() {
             {busy ? <ActivityIndicator color="#fff" /> : (
               <>
                 <Ionicons name="checkmark" size={18} color="#fff" />
-                <Text style={styles.primaryText}>Apply & render video</Text>
+                <Text style={styles.primaryText}>{t('apply_render_video')}</Text>
               </>
             )}
           </Pressable>

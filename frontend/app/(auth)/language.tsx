@@ -7,8 +7,10 @@ import { LinearGradient } from 'expo-linear-gradient';
 
 import { LANGUAGES, getLanguage, setLanguage, markOnboarded } from '@/src/i18n';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 export default function LanguagePick() {
+  const t = useT();
   const router = useRouter();
   const [sel, setSel] = useState<string>('en');
 
@@ -28,8 +30,8 @@ export default function LanguagePick() {
       />
       <SafeAreaView style={{ flex: 1 }}>
         <View style={styles.header}>
-          <Text style={styles.title}>Choose your language</Text>
-          <Text style={styles.sub}>You can change it anytime in Settings.</Text>
+          <Text style={styles.title}>{t('choose_language')}</Text>
+          <Text style={styles.sub}>{t('language_subtitle')}</Text>
         </View>
         <FlatList
           data={LANGUAGES}
@@ -40,7 +42,7 @@ export default function LanguagePick() {
             return (
               <Pressable
                 style={[styles.row, active && styles.rowOn]}
-                onPress={() => setSel(item.code)}
+                onPress={() => { setSel(item.code); void setLanguage(item.code); }}
                 testID={`lang-option-${item.code}`}
               >
                 <View style={{ flex: 1 }}>
@@ -54,7 +56,7 @@ export default function LanguagePick() {
         />
         <View style={styles.footer}>
           <Pressable style={styles.primary} onPress={done} testID="onboarding-continue">
-            <Text style={styles.primaryText}>Continue</Text>
+            <Text style={styles.primaryText}>{t('continue')}</Text>
             <Ionicons name="arrow-forward" size={18} color="#fff" />
           </Pressable>
         </View>

@@ -13,6 +13,7 @@ type Props = {
   titlePosition?: string;
   titleColor?: string;
   titleSize?: string;
+  brightness?: number;
 };
 
 const cssFilters: Record<string, string> = {
@@ -45,6 +46,7 @@ const titleColors: Record<string, string> = {
 export function ClipVideoPreview({
   uri, posterUri, height = 190, filter = 'original', look = 'original', title,
   titleFont = 'sans', titlePosition = 'bottom', titleColor = 'white', titleSize = 'medium',
+  brightness = 0,
 }: Props) {
   const player = useVideoPlayer(uri || null, (videoPlayer) => {
     videoPlayer.loop = true;
@@ -52,7 +54,8 @@ export function ClipVideoPreview({
   });
   const activePresets = [filter !== 'original' ? filter : null, look !== 'original' ? look : null].filter(Boolean) as string[];
   const effectiveFilter = activePresets.map((preset) => preset.replace('_', ' ')).join(' · ');
-  const webFilter = activePresets.map((preset) => cssFilters[preset]).filter(Boolean).join(' ');
+  const brightnessFilter = `brightness(${Math.max(0.5, Math.min(1.5, 1 + brightness))})`;
+  const webFilter = [...activePresets.map((preset) => cssFilters[preset]).filter(Boolean), brightnessFilter].join(' ');
   const tint = nativeTint[filter !== 'original' ? filter : look];
   const fontFamily = titleFont === 'serif' ? 'Georgia' : titleFont === 'mono' ? 'Courier New' : undefined;
   const fontSize = titleSize === 'large' ? 22 : titleSize === 'small' ? 14 : 18;
@@ -72,6 +75,7 @@ export function ClipVideoPreview({
         <View style={styles.empty}><Text style={styles.emptyText}>Clip preview unavailable</Text></View>
       )}
       {Platform.OS !== 'web' && tint ? <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: tint }]} /> : null}
+      {Platform.OS !== 'web' && brightness !== 0 ? <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: brightness > 0 ? '#fff' : '#000', opacity: Math.min(0.5, Math.abs(brightness)) }]} /> : null}
       {!!title && (
         <View pointerEvents="none" style={[styles.titleWrap, titlePosition === 'top' ? styles.titleTop : titlePosition === 'center' ? styles.titleCenter : styles.titleBottom]}>
           <Text

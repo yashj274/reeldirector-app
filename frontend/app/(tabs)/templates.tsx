@@ -7,8 +7,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api } from '@/src/api';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 export default function Templates() {
+  const t = useT();
   const router = useRouter();
   const [items, setItems] = useState<any[]>([]);
 
@@ -18,8 +20,8 @@ export default function Templates() {
     <View style={styles.root} testID="templates-screen">
       <SafeAreaView edges={['top']} style={{ flex: 1 }}>
         <View style={styles.header}>
-          <Text style={styles.title}>Templates</Text>
-          <Text style={styles.sub}>Pick a look. AI handles the rest.</Text>
+          <Text style={styles.title}>{t('templates')}</Text>
+          <Text style={styles.sub}>{t('template_subtitle')}</Text>
         </View>
         <FlatList
           data={items}
@@ -36,8 +38,8 @@ export default function Templates() {
               <Image source={{ uri: item.image }} style={StyleSheet.absoluteFill} contentFit="cover" />
               <LinearGradient colors={['transparent', 'rgba(10,11,14,0.92)']} style={StyleSheet.absoluteFill} />
               <View style={styles.tplText}>
-                <Text style={styles.tplName}>{item.name}</Text>
-                <Text style={styles.tplMeta}>{item.mood} · {item.duration}s</Text>
+                <Text style={styles.tplName}>{t(`template_${item.id}`)}</Text>
+                <Text style={styles.tplMeta}>{t(`template_mood_${item.id}`)} · {item.duration}s</Text>
               </View>
             </Pressable>
           )}

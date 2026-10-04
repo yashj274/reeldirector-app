@@ -5,8 +5,10 @@ import { StyleSheet, View } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { getToken } from '@/src/api';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 export default function TabsLayout() {
+  const t = useT();
   const router = useRouter();
   const [authChecked, setAuthChecked] = useState(false);
 
@@ -48,19 +50,19 @@ export default function TabsLayout() {
       }}
     >
       <Tabs.Screen name="dashboard" options={{
-        title: 'Home',
+        title: t('home'),
         tabBarIcon: ({ color, size }) => <Ionicons name="film-outline" size={size} color={color} />,
       }} />
       <Tabs.Screen name="projects" options={{
-        title: 'Projects',
+        title: t('projects'),
         tabBarIcon: ({ color, size }) => <Ionicons name="albums-outline" size={size} color={color} />,
       }} />
       <Tabs.Screen name="templates" options={{
-        title: 'Templates',
+        title: t('templates'),
         tabBarIcon: ({ color, size }) => <Ionicons name="sparkles-outline" size={size} color={color} />,
       }} />
       <Tabs.Screen name="profile" options={{
-        title: 'Profile',
+        title: t('profile'),
         tabBarIcon: ({ color, size }) => <Ionicons name="person-outline" size={size} color={color} />,
       }} />
     </Tabs>

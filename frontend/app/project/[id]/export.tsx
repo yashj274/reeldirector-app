@@ -11,6 +11,7 @@ import * as Haptics from 'expo-haptics';
 import { api } from '@/src/api';
 import { theme } from '@/src/theme';
 import { ClipVideoPreview } from '@/src/ClipVideoPreview';
+import { useT } from '@/src/i18n';
 
 type ClipEdit = {
   shot_index: number;
@@ -18,6 +19,7 @@ type ClipEdit = {
   trim_start_seconds: number;
   trim_end_seconds: number;
   filter_preset: string;
+  brightness: number;
 };
 
 type EditorSettings = {
@@ -104,6 +106,7 @@ function makeSettings(project: any): EditorSettings {
       trim_end_seconds: end,
       filter_preset: CLIP_FILTERS.some((filter) => filter.id === old?.filter_preset)
         ? old.filter_preset : 'original',
+      brightness: Math.max(-0.5, Math.min(0.5, Number(old?.brightness ?? clip?.brightness) || 0)),
     };
   });
   const savedMusicVolume = Number(saved.music_volume);
@@ -121,6 +124,7 @@ function makeSettings(project: any): EditorSettings {
 }
 
 export default function Export() {
+  const t = useT();
   const { id, clip: clipParam } = useLocalSearchParams<{ id: string; clip?: string }>();
   const router = useRouter();
   const editorScroll = useRef<any>(null);
@@ -184,7 +188,7 @@ export default function Export() {
   };
 
   const editFor = (shot: number) => settings.clip_edits.find((edit) => edit.shot_index === shot)
-    || { shot_index: shot, included: true, trim_start_seconds: 0, trim_end_seconds: 5, filter_preset: 'original' };
+    || { shot_index: shot, included: true, trim_start_seconds: 0, trim_end_seconds: 5, filter_preset: 'original', brightness: 0 };
 
   const moveClip = (shot: number, direction: -1 | 1) => {
     const currentOrder = [...settings.clip_order];
@@ -259,7 +263,7 @@ export default function Export() {
           <Pressable onPress={() => router.back()} testID="export-back">
             <Ionicons name="chevron-back" size={26} color={theme.color.onSurface} />
           </Pressable>
-          <Text style={styles.title}>Video editor</Text>
+          <Text style={styles.title}>{t('editor_title')}</Text>
           <View style={{ width: 26 }} />
         </View>
 
@@ -267,12 +271,12 @@ export default function Export() {
           <View style={styles.introCard}>
             <View style={styles.iconBadge}><Ionicons name="film-outline" size={22} color={theme.color.brand} /></View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.heading}>Shape your final video</Text>
-              <Text style={styles.subheading}>Arrange and trim clips, choose a look, add a title, and balance your audio.</Text>
+              <Text style={styles.heading}>{t('editor_heading')}</Text>
+              <Text style={styles.subheading}>{t('editor_subheading')}</Text>
             </View>
           </View>
 
-          <SectionTitle title="Clip order & trims" subtitle="Use the arrows to reorder. Trim the in and out points in half-second steps." />
+          <SectionTitle title={t('clip_order_trims')} subtitle={t('clip_order_help')} />
           {orderedClips.length ? orderedClips.map((clip: any, index: number) => {
             const shot = shotIndex(clip, index);
             const duration = Math.max(0.5, Number(clip.duration_seconds) || 5);
@@ -292,7 +296,7 @@ export default function Export() {
                   <View style={styles.clipNumber}><Text style={styles.clipNumberText}>{index + 1}</Text></View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.clipTitle} numberOfLines={1}>{clip.title || `Shot ${shot + 1}`}</Text>
-                    <Text style={styles.clipMeta}>{duration.toFixed(1)}s source · {clip.ai_generated ? 'AI clip' : 'Recorded clip'}</Text>
+                    <Text style={styles.clipMeta}>{duration.toFixed(1)}s source · {clip.ai_generated ? t('ai_clip') : t('recorded_clip')}</Text>
                   </View>
                   <Pressable accessibilityLabel="Move clip up" style={styles.orderButton} onPress={() => moveClip(shot, -1)} disabled={index === 0}>
                     <Ionicons name="chevron-up" size={20} color={index === 0 ? theme.color.onSurface3 : theme.color.onSurface} />
@@ -305,8 +309,8 @@ export default function Export() {
                 <View style={styles.clipPreviewWrap}>
                   <Text style={styles.previewHint}>
                     {shot === firstIncludedShotIndex && settings.title_text
-                      ? 'Preview · opening title and clip filter'
-                      : 'Preview · selected clip filter'}
+                      ? t('preview_opening_title')
+                      : t('preview_selected_filter')}
                   </Text>
                   <ClipVideoPreview
                     uri={clip.video_url}
@@ -314,6 +318,7 @@ export default function Export() {
                     height={220}
                     filter={edit.filter_preset}
                     look={settings.editing_style}
+                    brightness={edit.brightness}
                     title={shot === firstIncludedShotIndex ? settings.title_text : undefined}
                     titleFont={settings.title_font}
                     titlePosition={settings.title_position}
@@ -326,7 +331,7 @@ export default function Export() {
                   onPress={() => updateClip(shot, { included: !edit.included })}>
                   <Ionicons name={edit.included ? 'checkmark-circle' : 'remove-circle-outline'} size={17} color={edit.included ? theme.color.success : theme.color.onSurface3} />
                   <Text style={[styles.includeToggleText, !edit.included && styles.includeToggleTextOff]}>
-                    {edit.included ? 'Included in final video' : 'Skipped in final video'}
+                    {edit.included ? t('included_final') : t('skipped_final')}
                   </Text>
                 </Pressable>
 
@@ -336,23 +341,37 @@ export default function Export() {
                   <TrimControl label="OUT" value={edit.trim_end_seconds} onMinus={() => adjustTrim(shot, 'out', -0.5, duration)} onPlus={() => adjustTrim(shot, 'out', 0.5, duration)} />
                 </View>
 
-                <Text style={styles.rowLabel}>Clip filter</Text>
+                <Text style={styles.rowLabel}>{t('clip_filter')}</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
                   {CLIP_FILTERS.map((filter) => (
                     <Choice key={filter.id} label={filter.label} active={edit.filter_preset === filter.id}
                       onPress={() => updateClip(shot, { filter_preset: filter.id })} />
                   ))}
                 </ScrollView>
+                <View style={styles.brightnessRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.rowLabel}>{t('brightness')}</Text>
+                    <Text style={styles.brightnessValue}>{Math.round(edit.brightness * 100)}%</Text>
+                  </View>
+                  <Pressable accessibilityLabel="Lower clip brightness" style={styles.tinyButton}
+                    onPress={() => updateClip(shot, { brightness: Math.max(-0.5, Math.round((edit.brightness - 0.05) * 100) / 100) })}>
+                    <Ionicons name="remove" size={16} color={theme.color.onSurface} />
+                  </Pressable>
+                  <Pressable accessibilityLabel="Raise clip brightness" style={styles.tinyButton}
+                    onPress={() => updateClip(shot, { brightness: Math.min(0.5, Math.round((edit.brightness + 0.05) * 100) / 100) })}>
+                    <Ionicons name="add" size={16} color={theme.color.onSurface} />
+                  </Pressable>
+                </View>
               </View>
             );
           }) : (
             <View style={styles.emptyCard}>
               <Ionicons name="videocam-outline" size={25} color={theme.color.onSurface3} />
-              <Text style={styles.emptyText}>Record or upload at least one clip to start editing.</Text>
+              <Text style={styles.emptyText}>{t('record_clip_to_edit')}</Text>
             </View>
           )}
 
-          <SectionTitle title="Overall look" subtitle="Apply a finishing grade to the whole video." />
+          <SectionTitle title={t('overall_look')} subtitle={t('overall_grade')} />
           <View style={styles.choiceGrid}>
             {LOOKS.map((look) => (
               <Choice key={look.id} label={look.label} active={settings.editing_style === look.id}
@@ -360,24 +379,24 @@ export default function Export() {
             ))}
           </View>
 
-          <SectionTitle title="Title text" subtitle="Add a readable title overlay to the opening of your video." />
+          <SectionTitle title={t('title_text')} subtitle={t('title_overlay_help')} />
           <TextInput
             value={settings.title_text}
             onChangeText={(value) => update('title_text', value)}
-            placeholder="Type your title"
+            placeholder={t('type_title')}
             placeholderTextColor={theme.color.onSurface3}
             maxLength={80}
             style={styles.titleInput}
             accessibilityLabel="Video title text"
           />
           <Text style={styles.characterCount}>{settings.title_text.length}/80 characters</Text>
-          <Text style={styles.rowLabel}>Font</Text>
+          <Text style={styles.rowLabel}>{t('font')}</Text>
           <View style={styles.choiceGrid}>
             <Choice label="Sans" active={settings.title_font === 'sans'} onPress={() => update('title_font', 'sans')} />
             <Choice label="Serif" active={settings.title_font === 'serif'} onPress={() => update('title_font', 'serif')} />
             <Choice label="Space Mono" active={settings.title_font === 'mono'} onPress={() => update('title_font', 'mono')} />
           </View>
-          <Text style={styles.rowLabel}>Placement · size · color</Text>
+          <Text style={styles.rowLabel}>{t('placement_size_color')}</Text>
           <View style={styles.choiceGrid}>
             {['top', 'center', 'bottom'].map((position) => <Choice key={position} label={position} active={settings.title_position === position} onPress={() => update('title_position', position)} />)}
           </View>
@@ -388,39 +407,39 @@ export default function Export() {
             {[{ id: 'white', label: 'White' }, { id: 'gold', label: 'Gold' }, { id: 'pink', label: 'Pink' }, { id: 'black', label: 'Black' }].map((color) => <Choice key={color.id} label={color.label} active={settings.title_color === color.id} onPress={() => update('title_color', color.id)} />)}
           </View>
 
-          <SectionTitle title="Sound mix" subtitle="Adjust the soundtrack against audio captured with your clips." />
-          <VolumeControl label="Original clip audio" value={settings.original_volume} onChange={(value) => update('original_volume', value)} />
-          <VolumeControl label="Soundtrack" value={settings.music_volume} onChange={(value) => update('music_volume', value)} />
+          <SectionTitle title={t('sound_mix')} subtitle={t('sound_mix_help')} />
+          <VolumeControl label={t('original_clip_audio')} value={settings.original_volume} onChange={(value) => update('original_volume', value)} />
+          <VolumeControl label={t('soundtrack')} value={settings.music_volume} onChange={(value) => update('music_volume', value)} />
           {!project?.soundtrack?.storage_path && (
             <Pressable style={styles.musicLink} onPress={() => router.push({ pathname: '/project/[id]/music', params: { id: id! } })}>
               <Ionicons name="musical-notes-outline" size={18} color={theme.color.brand} />
-              <Text style={styles.musicLinkText}>Add a soundtrack</Text>
+              <Text style={styles.musicLinkText}>{t('add_soundtrack')}</Text>
               <Ionicons name="chevron-forward" size={17} color={theme.color.brand} />
             </Pressable>
           )}
 
-          <SectionTitle title="Export format" subtitle="Choose a format that matches where you’ll upload." />
+          <SectionTitle title={t('export_format')} subtitle={t('export_help')} />
           <View style={styles.choiceGrid}>
             {ASPECTS.map((item) => <Choice key={item.id} label={item.label} active={settings.aspect_ratio === item.id} onPress={() => update('aspect_ratio', item.id)} />)}
           </View>
-          <Text style={styles.rowLabel}>Frame the clips</Text>
+          <Text style={styles.rowLabel}>{t('frame_clips')}</Text>
           <View style={styles.choiceGrid}>
-            <Choice label="Fill frame" active={settings.fit_mode === 'fill'} onPress={() => update('fit_mode', 'fill')} />
-            <Choice label="Fit whole clip" active={settings.fit_mode === 'fit'} onPress={() => update('fit_mode', 'fit')} />
+            <Choice label={t('fill_frame')} active={settings.fit_mode === 'fill'} onPress={() => update('fit_mode', 'fill')} />
+            <Choice label={t('fit_whole_clip')} active={settings.fit_mode === 'fit'} onPress={() => update('fit_mode', 'fit')} />
           </View>
-          <Text style={styles.rowLabel}>Resolution</Text>
+          <Text style={styles.rowLabel}>{t('resolution')}</Text>
           <View style={styles.choiceGrid}>
             {['720p', '1080p'].map((resolution) => <Choice key={resolution} label={resolution} active={settings.resolution === resolution} onPress={() => update('resolution', resolution)} />)}
           </View>
-          <Text style={styles.rowLabel}>Frame rate</Text>
+          <Text style={styles.rowLabel}>{t('frame_rate')}</Text>
           <View style={styles.choiceGrid}>
             {[24, 30, 60].map((fps) => <Choice key={fps} label={`${fps} fps`} active={settings.fps === fps} onPress={() => update('fps', fps)} />)}
           </View>
 
           <View style={styles.metaBox}>
-            <MetaRow label="Clips in edit" value={`${selectedClipCount} of ${orderedClips.length}`} />
-            <MetaRow label="Estimated length" value={`${estimatedDuration.toFixed(1)}s`} />
-            <MetaRow label="Export size" value={`${settings.resolution} · ${settings.fps} fps`} />
+            <MetaRow label={t('clips_in_edit')} value={`${selectedClipCount} of ${orderedClips.length}`} />
+            <MetaRow label={t('estimated_length')} value={`${estimatedDuration.toFixed(1)}s`} />
+            <MetaRow label={t('export_size')} value={`${settings.resolution} · ${settings.fps} fps`} />
           </View>
 
           {!!notice && <Text style={styles.notice}>{notice}</Text>}
@@ -431,17 +450,17 @@ export default function Export() {
                 <LinearGradient colors={[theme.color.brand, 'rgba(224,17,95,0)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
               </Animated.View>
               <View style={styles.ringInner}><ActivityIndicator color={theme.color.brand} /></View>
-              <Text style={styles.progressText}>{renderStage || 'Rendering your video…'}</Text>
+              <Text style={styles.progressText}>{renderStage || t('rendering_video')}</Text>
             </View>
           )}
 
           <Pressable style={[styles.saveButton, (saving || rendering || !dirty) && styles.disabledButton]} onPress={() => void save()} disabled={saving || rendering || !dirty}>
             {saving ? <ActivityIndicator color={theme.color.onSurface} /> : <Ionicons name="bookmark-outline" size={18} color={theme.color.onSurface} />}
-            <Text style={styles.saveButtonText}>{saving ? 'Saving…' : dirty ? 'Save edit' : 'Edits saved'}</Text>
+            <Text style={styles.saveButtonText}>{saving ? t('saving') : dirty ? t('save_edit') : t('edits_saved')}</Text>
           </Pressable>
           <Pressable style={[styles.primary, (rendering || saving || !selectedClipCount) && styles.disabledPrimary]} onPress={() => void render()} disabled={rendering || saving || !selectedClipCount} testID="export-render-button">
             {rendering ? <ActivityIndicator color="#fff" /> : <Ionicons name="download-outline" size={19} color="#fff" />}
-            <Text style={styles.primaryText}>{rendering ? 'Rendering…' : 'Render upload-ready video'}</Text>
+            <Text style={styles.primaryText}>{rendering ? t('rendering_video') : t('render_upload_ready')}</Text>
           </Pressable>
         </ScrollView>
       </SafeAreaView>
@@ -516,6 +535,8 @@ const styles = StyleSheet.create({
   tinyButton: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.color.surface3 },
   rowLabel: { color: theme.color.onSurface3, fontSize: 11, fontWeight: '700', marginTop: 14, marginBottom: 7, textTransform: 'uppercase', letterSpacing: 0.6 },
   filterRow: { gap: 7, paddingRight: 8 },
+  brightnessRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 5 },
+  brightnessValue: { color: theme.color.onSurface3, fontSize: 11, marginTop: 2 },
   choiceGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
   choice: { minHeight: 37, paddingHorizontal: 13, borderRadius: theme.radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border },
   choiceOn: { backgroundColor: theme.color.brandTint, borderColor: theme.color.brand },

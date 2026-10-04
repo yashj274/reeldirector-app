@@ -59,6 +59,7 @@ class QuestionnaireIn(BaseModel):
     style: str = "cinematic"
     platform: str = "instagram_reel"
     audience: str = ""
+    language: str = "en"
 
 class ProjectOut(BaseModel):
     id: str
@@ -82,17 +83,22 @@ class ProjectOut(BaseModel):
 
 class SceneScanIn(BaseModel):
     image_base64: str  # jpeg base64 without header
+    project_id: Optional[str] = None
+    language: Optional[str] = None
 
 class DirectorInstructionIn(BaseModel):
     project_id: str
     shot_index: int
     image_base64: Optional[str] = None
+    language: Optional[str] = None
 
 class ClipQualityIn(BaseModel):
     project_id: str
     shot_index: int
     frame_base64: str  # sample frame from clip
     duration_seconds: float
+    brightness: float = 0.0
+    language: Optional[str] = None
     frame_storage_path: Optional[str] = None
     video_storage_path: Optional[str] = None
 
@@ -102,6 +108,7 @@ class ClipEditIn(BaseModel):
     trim_start_seconds: float = 0
     trim_end_seconds: Optional[float] = None
     filter_preset: str = "original"
+    brightness: float = 0.0
 
 class ExportIn(BaseModel):
     project_id: Optional[str] = None  # taken from URL path; body-optional
@@ -147,6 +154,11 @@ class StoryboardPatch(BaseModel):
 class RegenShotIn(BaseModel):
     shot_index: int
     notes: Optional[str] = None
+    language: Optional[str] = None
+
+
+class StoryboardRequest(BaseModel):
+    language: Optional[str] = None
 
 
 class RetakeIn(BaseModel):
@@ -331,7 +343,8 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
 
 def _normalize_video_clip(input_file: Path, output_file: Path, width: int, height: int, fps: int,
                           trim_start_seconds: float = 0, trim_end_seconds: Optional[float] = None,
-                          filter_preset: str = "original", fit_mode: str = "fill") -> None:
+                          filter_preset: str = "original", fit_mode: str = "fill",
+                          brightness: float = 0.0) -> None:
     """Transcode mixed phone/AI sources into matching MP4 video and AAC audio streams."""
     ffmpeg = _ffmpeg_executable()
     probe = subprocess.run(
@@ -365,6 +378,9 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
     preset = clip_filters.get(filter_preset, "")
     if preset:
         video_filter = video_filter.replace(",format=yuv420p", f",{preset},format=yuv420p")
+    exposure = max(-0.5, min(0.5, float(brightness or 0)))
+    if abs(exposure) >= 0.01:
+        video_filter = video_filter.replace(",format=yuv420p", f",eq=brightness={exposure:.3f},format=yuv420p")
     command.extend([
         "-map", "0:v:0", "-map", audio_map, "-vf", video_filter,
         "-af", "apad", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
@@ -641,16 +657,182 @@ async def delete_project(pid: str, user=Depends(current_user)):
 
 
 # ---------------- AI: Storyboard ----------------
-STORYBOARD_SYSTEM = """You are a world-class film director creating storyboards for short cinematic videos.
-Return ONLY a JSON array of 4 to 8 shots. Each shot object has these keys:
+LANGUAGE_NAMES = {
+    "en": "English", "hi": "Hindi", "te": "Telugu", "ta": "Tamil",
+    "kn": "Kannada", "ml": "Malayalam", "mr": "Marathi", "bn": "Bengali",
+    "gu": "Gujarati", "pa": "Punjabi", "es": "Spanish", "fr": "French",
+    "de": "German", "ar": "Arabic", "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
+}
+UI_TRANSLATION_SOURCE = {
+    "choose_language": "Choose your language", "language_subtitle": "You can change it anytime in Settings.",
+    "continue": "Continue", "welcome_back": "Welcome back", "signin_subtitle": "Sign in to keep directing.",
+    "email": "Email", "password": "Password", "forgot_password": "Forgot password?", "sign_in": "Sign in",
+    "new_here": "New here?", "create_account": "Create an account", "create_account_title": "Create account",
+    "signup_subtitle": "Your first reel is 60 seconds away.", "full_name": "Full name", "have_account": "Have an account?",
+    "send_reset_link": "Send reset link", "reset_password": "Reset password", "new_password": "New password",
+    "update_password": "Update password", "give_reel_name": "Give it a name", "new_reel": "New Reel",
+    "type_of_shoot": "Type of shoot", "mood": "Mood", "duration": "Duration", "platform": "Platform",
+    "purpose_label": "What is it for?", "purpose_hint": "Describe what the video should show and why you are making it.",
+    "purpose_placeholder": "Example: Prachi's mehndi ceremony — show henna details, family moments, and the joyful rituals.",
+    "purpose_required": "Add a little more detail so the AI can plan your story (at least 10 characters).",
+    "target_audience": "Target audience (optional)", "create_project": "Create project",
+    "custom_script": "Your custom script", "scene_scan_label": "AI environment scan",
+    "script_and_shots": "Custom script and shots", "storyboard": "Storyboard", "shots_progress": "shots",
+    "no_purpose": "No purpose set", "generate_storyboard": "Generate AI storyboard",
+    "directing_your_shoot": "Directing your shoot…", "preview_final_reel": "Preview final reel",
+    "continue_shooting": "Continue shooting", "reshoot": "Reshoot", "edit_video_export": "Edit video & export",
+    "scan_fallback": "Automatic scan was unavailable; the script uses your description.",
+    "clip_filter": "Clip filter", "overall_look": "Overall look", "title_text": "Title text",
+    "sound_mix": "Sound mix", "export_format": "Export format", "save_edit": "Save edit",
+    "edits_saved": "Edits saved", "render_upload_ready": "Render upload-ready video",
+    "editor_title": "Video editor", "editor_heading": "Shape your final video",
+    "editor_subheading": "Arrange and trim clips, choose a look, add a title, and balance your audio.",
+    "clip_order_trims": "Clip order & trims", "clip_order_help": "Use the arrows to reorder. Trim the in and out points in half-second steps.",
+    "ai_clip": "AI clip", "recorded_clip": "Recorded clip", "preview_opening_title": "Preview · opening title and clip filter",
+    "preview_selected_filter": "Preview · selected clip filter", "included_final": "Included in final video",
+    "skipped_final": "Skipped in final video", "overall_grade": "Apply a finishing grade to the whole video.",
+    "title_overlay_help": "Add a readable title overlay to the opening of your video.",
+    "sound_mix_help": "Adjust the soundtrack against audio captured with your clips.",
+    "export_help": "Choose a format that matches where you’ll upload.",
+    "record_clip_to_edit": "Record or upload at least one clip to start editing.", "type_title": "Type your title",
+    "font": "Font", "placement_size_color": "Placement · size · color", "original_clip_audio": "Original clip audio",
+    "soundtrack": "Soundtrack", "add_soundtrack": "Add a soundtrack", "frame_clips": "Frame the clips",
+    "fill_frame": "Fill frame", "fit_whole_clip": "Fit whole clip", "resolution": "Resolution", "frame_rate": "Frame rate",
+    "clips_in_edit": "Clips in edit", "estimated_length": "Estimated length", "export_size": "Export size",
+    "rendering_video": "Rendering your video…", "saving": "Saving…",
+    "reel_name_example": "Example: Sunset rooftop", "audience_example": "Example: families, students, food lovers",
+    "move_static": "Hold still", "move_pan_left": "Pan left", "move_pan_right": "Pan right",
+    "move_tilt_up": "Tilt up", "move_tilt_down": "Tilt down", "move_dolly_in": "Move closer",
+    "move_dolly_out": "Move back", "move_tracking": "Track the subject", "move_orbit": "Move around",
+    "move_reveal": "Reveal the scene", "move_handheld": "Gentle handheld",
+    "custom": "Custom", "title_required_error": "Give your reel a name first.",
+    "email_reset_copy": "Enter your account email and we’ll send you a secure reset link.",
+    "choose_password_copy": "Choose a new password for your account.",
+    "password_reset_expired": "This password reset link has expired. Request a new one.",
+    "password_min_error": "Use at least 8 characters for your password.", "password_mismatch": "The passwords do not match.",
+    "reset_email_required": "Enter the email address for your account.",
+    "reset_email_sent": "If an account uses that email, a password reset link is on its way.",
+    "password_changed": "Your password has been changed. You can now sign in.",
+    "rating_unavailable": "Automatic shot rating is unavailable right now. Your clip is saved for review.",
+    "dashboard_hello": "Hey {name}", "ready_magic": "Ready to make magic?", "start_new_reel": "Start a new reel",
+    "ai_plans_directs_edits": "AI plans, directs, and edits for you.", "cinematic_templates": "Cinematic Templates",
+    "recent_projects": "Recent projects", "see_all": "See all", "first_masterpiece": "Your first masterpiece is one tap away.",
+    "try_again": "Try again", "sign_in_again": "Sign in again", "no_projects": "No projects yet. Tap + to create one.",
+    "profile": "Profile", "preferences": "Preferences", "account": "Account", "support": "Support",
+    "language": "Language", "editing_style": "Editing style", "subscription": "Subscription", "downloads": "Downloads",
+    "notifications": "Notifications", "help_faq": "Help & FAQ", "send_feedback": "Send Feedback", "privacy": "Privacy",
+    "log_out": "Log out", "home": "Home", "projects": "Projects", "templates": "Templates",
+    "template_subtitle": "Pick a look. AI handles the rest.",
+    "project_status_draft": "Draft", "project_status_storyboarded": "Script ready", "project_status_shooting": "In progress",
+    "project_status_exported": "Exported", "all_projects": "Projects",
+    "reel_ready": "Your reel is ready", "edit_this_video": "Edit this video",
+    "edit_video_features": "Trim clips · filters · text & fonts · sound", "duration_label": "Duration",
+    "aspect_label": "Aspect", "size_label": "Size", "style_label": "Style", "music_label": "Music",
+    "captions_label": "Captions", "render_label": "Render", "none": "None", "on": "On", "off": "Off",
+    "content": "Content", "download": "Download", "saved_to_cloud": "Saved to cloud", "save_project": "Save project",
+    "change_regenerate": "Change & Regenerate", "change_music": "Change music", "change_style": "Change style",
+    "regenerate": "Regenerate", "edit_again": "Edit again", "export_for": "Export for",
+    "more_formats": "More formats", "play": "Play", "pause": "Pause", "full": "Full", "share": "Share",
+    "export_other_format": "Export in another format", "loading_reel": "Loading your reel…",
+    "could_not_open_reel": "Could not open this reel", "project_unavailable": "The project is unavailable.",
+    "go_back": "Go back", "video_saved": "Video saved", "reel_saved_library": "Your finished reel is in your photo library.",
+    "save_video_failed": "Could not save video", "allow_library_save": "Allow photo-library access to save the video.",
+    "camera_mic_title": "Camera and microphone access needed",
+    "camera_https_copy": "This local link cannot open a live camera. Use the button below to record with your phone camera or choose a saved clip.",
+    "camera_permission_copy": "Allow both so ReelDirector can show shot guidance and record video with sound.",
+    "phone_camera_clip_ready": "Phone camera clip ready", "record_or_choose_video": "Record or choose a video",
+    "open_live_camera": "Open live camera", "live_camera": "Live camera preview", "checking_clip_frame": "Checking a frame from your clip…",
+    "shot_counter": "SHOT {current}/{total}", "video_mode": "Video", "stabilized_mode": "Stabilized",
+    "grid": "Grid", "flip_camera": "Flip camera",
+    "use_your_audio": "Use your own audio", "current_music_mix": "Your music will be mixed with the sound recorded by the camera.",
+    "import_audio_mix": "Import an audio file to mix it with your recorded clips.", "pause_preview": "Pause preview",
+    "preview": "Preview", "remove": "Remove", "choose_different_audio": "Choose a different audio file",
+    "choose_audio_file": "Choose audio file", "audio_file_note": "Supports common audio files up to 25 MB. Camera audio remains in the final video.",
+    "apply_render_video": "Apply & render video",
+    "custom_shoot_type": "Custom shoot type", "custom_shoot_help": "AI will adapt the storyboard to your idea.",
+    "custom_shoot_example": "Example: Birthday Party, Bike Ride, College Fest", "cancel": "Cancel", "add": "Add",
+    "shoot_type_wedding": "Wedding", "shoot_type_travel": "Travel", "shoot_type_food": "Food",
+    "shoot_type_fashion": "Fashion", "shoot_type_gym": "Gym", "shoot_type_product": "Product",
+    "shoot_type_real_estate": "Real estate", "shoot_type_cafe": "Cafe", "shoot_type_restaurant": "Restaurant",
+    "shoot_type_event": "Event", "shoot_type_documentary": "Documentary", "shoot_type_business": "Business",
+    "shoot_type_lifestyle": "Lifestyle", "shoot_type_daily_vlog": "Daily vlog", "shoot_type_social_media": "Social media",
+    "shoot_type_cinematic": "Cinematic", "mood_cinematic": "Cinematic", "mood_emotional": "Emotional",
+    "mood_energetic": "Energetic", "mood_luxury": "Luxury", "mood_minimal": "Minimal", "mood_warm": "Warm",
+    "template_wedding": "Wedding Cinema", "template_travel": "Travel Vlog", "template_food": "Food Cinematic",
+    "template_fashion": "Fashion Editorial", "template_gym": "Gym Motivation", "template_real_estate": "Real Estate",
+    "template_product": "Product Showcase", "template_viral": "Viral Reel",
+    "template_mood_wedding": "Emotional • Romantic", "template_mood_travel": "Adventure • Wide",
+    "template_mood_food": "Warm • Macro", "template_mood_fashion": "Bold • Editorial",
+    "template_mood_gym": "High Energy", "template_mood_real_estate": "Luxury • Spacious",
+    "template_mood_product": "Clean • Premium", "template_mood_viral": "Fast • Bold",
+    "customize_storyboard": "Customize storyboard", "save": "Save", "description_label": "Description",
+    "add_scene": "Add scene", "regenerate_scene": "Regenerate scene", "optional_ai_notes": "Optional notes to steer the AI.",
+    "regen_notes_example": "Example: more dramatic, add golden hour light", "new_shot": "New Shot",
+    "describe_shot": "Describe this shot", "hold_camera_steady": "Hold camera steady",
+    "shot_size_extreme_wide": "Extreme wide", "shot_size_wide": "Wide", "shot_size_medium": "Medium",
+    "shot_size_close_up": "Close-up", "shot_size_extreme_close_up": "Extreme close-up",
+    "edit_filters_text_trim": "Edit filters, text & trim", "confirm_new_password": "Confirm new password",
+    "request_another_link": "Request another link", "could_not_update_password": "Could not update your password. Please try again.",
+    "environment_scan": "AI environment scan", "scan_explainer": "Scan the place you will film. The AI will use the scene and your description to write a custom shot plan.",
+    "camera_access_needed": "Camera access needed", "scan_permission": "Allow camera access to scan the filming environment.",
+    "grant_access": "Grant access", "scan_scene": "Scan scene", "analyzing_scene": "Analyzing scene…",
+    "scene_analyzed": "Scene analyzed", "lighting": "Lighting", "composition": "Composition",
+    "suggested_shots": "Suggested shots", "scan_again": "Scan again", "generate_script": "Use scan & write my script",
+    "skip_scan": "Continue without a scan", "start_shooting": "Start shooting", "generating_story": "Writing your custom story…",
+    "move_guide": "Movement guide", "flashlight": "Flashlight", "brightness": "Brightness",
+    "blur": "Blur", "exposure": "Exposure", "framing": "Framing", "stability": "Stability",
+    "clip_saved": "Clip saved", "great_shot": "Great shot!", "retake_suggested": "Retake suggested",
+    "retake_required": "Retake required", "your_shot": "Your shot · watch it back", "retake": "Retake",
+    "next_shot": "Next shot", "finish_edit": "Finish & edit", "camera_movement_unavailable": "This browser cannot control the flashlight on this device.",
+    "translation_loading": "Preparing your language…", "translation_failed": "Some labels may remain in English while offline.",
+}
+UI_TRANSLATION_CACHE: Dict[str, Dict[str, str]] = {"en": dict(UI_TRANSLATION_SOURCE)}
+
+@api.get("/ui/translations/{language_code}")
+async def translate_ui(language_code: str):
+    code = language_code.lower()
+    if code not in LANGUAGE_NAMES:
+        raise HTTPException(404, "Choose a supported language.")
+    if code not in UI_TRANSLATION_CACHE:
+        language = LANGUAGE_NAMES[code]
+        try:
+            source_items = list(UI_TRANSLATION_SOURCE.items())
+            translated_all: Dict[str, str] = {}
+            for offset in range(0, len(source_items), 45):
+                source_chunk = dict(source_items[offset:offset + 45])
+                prompt = (
+                    f"Translate each value in this JSON dictionary into natural, concise {language} suitable for a mobile video app. "
+                    "Preserve every key and placeholder exactly, return only one JSON object, keep technical labels understandable, "
+                    "and do not translate brand names or change numbers. Source dictionary: "
+                    + json.dumps(source_chunk, ensure_ascii=False)
+                )
+                translated = extract_json(await chat_once(
+                    "You are a professional mobile-app localization translator. Return valid JSON only.", prompt,
+                ))
+                if not isinstance(translated, dict):
+                    raise ValueError("translation response was not an object")
+                translated_all.update({
+                    key: str(translated.get(key) or value)
+                    for key, value in source_chunk.items()
+                })
+            UI_TRANSLATION_CACHE[code] = translated_all
+        except Exception as error:
+            log.warning("UI translation unavailable for %s: %s", code, error)
+            raise HTTPException(503, "Translations are temporarily unavailable. Try again when online.")
+    return {"language": code, "translations": UI_TRANSLATION_CACHE[code]}
+
+STORYBOARD_SYSTEM = """You are a culturally informed film director and short-form video scriptwriter.
+Return ONLY one JSON object with keys `script` (a concise, coherent 2-4 sentence concept or voiceover in the requested language) and `shots` (an array of 4 to 8 shots). Each shot object has these keys:
 - index (int, starting 0)
 - title (short, e.g., "Opening Wide Shot")
 - description (1 sentence directing what appears on screen)
+- narration (a short optional spoken line in the requested language; use an empty string when voiceover would feel unnatural)
+- on_screen_text (a short optional caption in the requested language)
 - camera_movement (one of: static, pan_left, pan_right, tilt_up, tilt_down, dolly_in, dolly_out, tracking, orbit, reveal, handheld)
 - shot_size (one of: extreme_wide, wide, medium, close_up, extreme_close_up)
 - duration_seconds (float, 1.5 to 12.0)
 - direction (1 sentence telling the person holding the phone what to do physically, e.g., "Stand 6 feet back, hold phone at chest height, slowly walk forward.")
-No prose. No markdown. Just the JSON array."""
+No prose outside the JSON. Keep all script, shot titles, descriptions, narration, captions, and physical directions in the requested language. Be specific to the user's purpose and audience. Infer cultural meaning from clear event names (for example, a mehndi is commonly a South Asian pre-wedding celebration centered on henna art, close family moments, music, and ritual); use that understanding respectfully, adapt details to the supplied scene scan, and never invent people or rituals that the user did not describe or the image does not support. Do not replace the user's event with a generic template."""
 
 
 def fallback_storyboard(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -697,29 +879,47 @@ def fallback_storyboard(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 @api.post("/projects/{pid}/storyboard")
-async def generate_storyboard(pid: str, user=Depends(current_user)):
+async def generate_storyboard(pid: str, body: Optional[StoryboardRequest] = None, user=Depends(current_user)):
     doc = await fetch_project(pid, user["id"])
     if not doc:
         raise HTTPException(404, "Project not found")
 
-    prompt = f"""Create a storyboard for this project:
+    selected_code = str((body.language if body and body.language else doc.get("language")) or "en").lower()
+    language = LANGUAGE_NAMES.get(selected_code, "English")
+    if selected_code in LANGUAGE_NAMES:
+        doc["language"] = selected_code
+    scene_map = doc.get("scene_map") or {}
+    scene_context = (
+        json.dumps(scene_map, ensure_ascii=False)
+        if scene_map and scene_map.get("ai_generated", True)
+        else "No reliable AI environment scan was available. Use the creator's description and title only."
+    )
+    prompt = f"""Create a highly customized script and shot list in {language} for this video:
 Title: {doc['title']}
 Type: {doc['shoot_type']}
-Purpose: {doc['purpose'] or 'general showcase'}
+Creator's explanation of the video and desired story: {doc['purpose'] or 'No additional explanation was supplied; infer only from the title and type.'}
 Mood: {doc['mood'] or 'cinematic'}
 Style: {doc['style']}
 Platform: {doc['platform']}
 Target duration: {doc['duration_seconds']} seconds
 Audience: {doc['audience'] or 'general'}
+Selected language: {language}
+Environment scan: {scene_context}
 
-Return 4 to 8 shots that sum to approximately {doc['duration_seconds']} seconds.
+Use the title and creator's explanation as the source of truth. Notice cultural/event references and make the storytelling, shot ideas, props/details, and narration fit that occasion. Use the environment scan to choose subjects, backgrounds, lighting, and feasible framing; never claim a person or object is present unless the scan supports it. Return the script plus 4 to 8 shots that sum to approximately {doc['duration_seconds']} seconds.
 Use durations between 1.5 and 12 seconds so the complete storyboard matches the target duration.
-Make it feel cinematic and doable on a phone camera."""
+Make it cinematic, practical to film on a phone, and tailored to {doc['platform']}."""
 
     ai_generated = True
+    script = ""
     try:
         raw = await chat_once(STORYBOARD_SYSTEM, prompt)
-        shots = extract_json(raw)
+        response_data = extract_json(raw)
+        if isinstance(response_data, dict):
+            shots = response_data.get("shots")
+            script = str(response_data.get("script") or "").strip()
+        else:
+            shots = response_data
         if not isinstance(shots, list) or not shots:
             raise ValueError("bad storyboard")
         for i, s in enumerate(shots):
@@ -729,8 +929,9 @@ Make it feel cinematic and doable on a phone camera."""
         log.warning("storyboard generation unavailable; using local fallback: %s", e)
         ai_generated = False
         shots = fallback_storyboard(doc)
+        script = f"A {doc.get('mood') or 'cinematic'} story about {doc.get('purpose') or doc.get('title')}, shaped for {doc.get('platform') or 'short video'}."
 
-    doc.update({"storyboard": shots, "status": "storyboarded",
+    doc.update({"storyboard": shots, "script": script, "status": "storyboarded",
                 "storyboard_ai_generated": ai_generated,
                 "updated_at": datetime.now(timezone.utc).isoformat()})
     await save_project(doc, user["id"])
@@ -758,13 +959,27 @@ No prose. No markdown."""
 async def scan_environment(body: SceneScanIn, user=Depends(current_user)):
     if not body.image_base64:
         raise HTTPException(400, "image_base64 required")
+    doc = await fetch_project(body.project_id, user["id"]) if body.project_id else None
+    if body.project_id and not doc:
+        raise HTTPException(404, "Project not found")
+    selected_code = str(body.language or (doc or {}).get("language") or "en").lower()
+    language = LANGUAGE_NAMES.get(selected_code, "English")
+    context = ""
+    if doc:
+        context = f"""Planned video title: {doc.get('title')}
+Creator's explanation: {doc.get('purpose') or 'not supplied'}
+Shoot type: {doc.get('shoot_type') or 'general'}
+Keep event and cultural context in mind, but describe only visual evidence in the frame."""
     try:
         raw = await chat_once(
-            SCAN_SYSTEM, "Analyze this camera view for filming.", [body.image_base64]
+            SCAN_SYSTEM,
+            f"Analyze this camera view for the user's planned video. Return all descriptive text in {language}.\n{context}",
+            [body.image_base64],
         )
         data = extract_json(raw)
         if not isinstance(data, dict):
             raise ValueError("bad scan json")
+        data["ai_generated"] = True
     except Exception as e:
         log.exception("scan fail: %s", e)
         data = {
@@ -779,7 +994,12 @@ async def scan_environment(body: SceneScanIn, user=Depends(current_user)):
             "recommended_style": "cinematic",
             "suggested_shots": ["Wide establishing", "Medium tracking", "Close-up detail"],
             "tips": ["Move toward natural light", "Keep background simple", "Steady both hands"],
+            "ai_generated": False,
         }
+    if doc:
+        doc.update({"scene_map": data, "language": selected_code if selected_code in LANGUAGE_NAMES else doc.get("language", "en"),
+                    "updated_at": datetime.now(timezone.utc).isoformat()})
+        await save_project(doc, user["id"])
     return data
 
 
@@ -802,12 +1022,16 @@ async def director_instruct(body: DirectorInstructionIn, user=Depends(current_us
     if body.shot_index < 0 or body.shot_index >= len(doc["storyboard"]):
         raise HTTPException(400, "shot_index out of range")
     shot = doc["storyboard"][body.shot_index]
+    selected_code = str(body.language or doc.get("language") or "en").lower()
+    language = LANGUAGE_NAMES.get(selected_code, "English")
     prompt = f"""Desired shot:
 Title: {shot['title']}
 Description: {shot['description']}
 Camera movement: {shot['camera_movement']}
 Shot size: {shot['shot_size']}
 Direction to person: {shot['direction']}
+Environment scan: {json.dumps(doc.get('scene_map') or {}, ensure_ascii=False)}
+Reply in {language}.
 
 Give the next short instruction."""
     try:
@@ -845,9 +1069,14 @@ async def clip_quality(body: ClipQualityIn, user=Depends(current_user)):
         raise HTTPException(404, "Project not found")
 
     try:
+        shot = (doc.get("storyboard") or [])[body.shot_index] if body.shot_index < len(doc.get("storyboard") or []) else {}
+        selected_code = str(body.language or doc.get("language") or "en").lower()
         raw = await chat_once(
             QUALITY_SYSTEM,
-            f"Duration: {body.duration_seconds:.1f}s. Rate this frame.",
+            f"Duration: {body.duration_seconds:.1f}s. Planned shot: {json.dumps(shot, ensure_ascii=False)}. "
+            f"The project is about: {doc.get('purpose') or doc.get('title')}. "
+            f"Return all written feedback in {LANGUAGE_NAMES.get(selected_code, 'English')}. "
+            "Rate whether this frame fits the requested shot, and give one actionable, kind suggestion.",
             [body.frame_base64],
         )
         data = extract_json(raw)
@@ -1252,10 +1481,13 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
             raise HTTPException(400, f"Shot {shot_index + 1} ends beyond the saved clip duration.")
         if edit.filter_preset not in supported_clip_filters:
             raise HTTPException(400, f"Shot {shot_index + 1} has an unsupported filter.")
+        if not math.isfinite(float(edit.brightness)):
+            raise HTTPException(400, f"Shot {shot_index + 1} has an invalid brightness value.")
         normalized_edits[shot_index] = {
             "trim_start_seconds": trim_start,
             "trim_end_seconds": trim_end,
             "filter_preset": edit.filter_preset,
+            "brightness": max(-0.5, min(0.5, float(edit.brightness))),
         }
 
     if body.title_font not in {"sans", "serif", "mono"}:
@@ -1328,6 +1560,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
                     _normalize_video_clip, source_clip, local_clip, width, height, body.fps,
                     clip_edit.get("trim_start_seconds", 0), clip_edit.get("trim_end_seconds"),
                     clip_edit.get("filter_preset", "original"), body.fit_mode,
+                    clip_edit.get("brightness", clip.get("brightness", 0)),
                 )
                 if not local_clip.stat().st_size:
                     raise RuntimeError("A saved video clip could not be normalized")
@@ -1443,10 +1676,18 @@ async def regen_shot(pid: str, body: RegenShotIn, user=Depends(current_user)):
         raise HTTPException(400, "shot_index out of range")
 
     existing = shots[body.shot_index]
+    selected_code = str(body.language or doc.get("language") or "en").lower()
+    language = LANGUAGE_NAMES.get(selected_code, "English")
+    scan_context = doc.get("scene_map") or {}
+    if scan_context.get("ai_generated") is False:
+        scan_context = "No reliable AI environment scan was available. Use the creator's description and current shot only."
     prompt = f"""Regenerate shot #{body.shot_index + 1} for project '{doc['title']}' ({doc['shoot_type']}, {doc['style']}).
+Creator's explanation: {doc.get('purpose') or 'not supplied'}
+Selected language: {language}
+Environment scan: {json.dumps(scan_context, ensure_ascii=False)}
 Current shot: {json.dumps(existing)}
 User notes: {body.notes or 'make it more cinematic'}
-Return ONLY one JSON object matching the same keys (index, title, description, camera_movement, shot_size, duration_seconds, direction)."""
+Return ONLY one JSON object matching the same keys (index, title, description, camera_movement, shot_size, duration_seconds, direction). Keep all written fields in {language} and fit the project context and actual scanned environment."""
     try:
         raw = await chat_once(
             STORYBOARD_SYSTEM.replace("array of shots", "single shot object"), prompt
@@ -1462,6 +1703,8 @@ Return ONLY one JSON object matching the same keys (index, title, description, c
     except Exception as e:
         log.warning("regen fail: %s", e)
         shots[body.shot_index] = {**existing, "status": "pending"}
+    if selected_code in LANGUAGE_NAMES:
+        doc["language"] = selected_code
     doc["storyboard"] = shots
     doc["updated_at"] = datetime.now(timezone.utc).isoformat()
     await save_project(doc, user["id"])

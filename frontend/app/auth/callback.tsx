@@ -17,6 +17,7 @@ function paramsFromUrl(url: string) {
     type: query.get('type') || fragment.get('type'),
     accessToken: query.get('access_token') || fragment.get('access_token'),
     refreshToken: query.get('refresh_token') || fragment.get('refresh_token'),
+    next: query.get('next'),
     errorDescription: query.get('error_description') || fragment.get('error_description'),
   };
 }
@@ -57,7 +58,10 @@ export default function AuthCallback() {
           authError = result.error;
         }
         if (authError) throw authError;
-        if (active) router.replace('/(tabs)/dashboard');
+        const destination = params.next === '/(auth)/reset-password?mode=update'
+          ? '/(auth)/reset-password?mode=update'
+          : '/(tabs)/dashboard';
+        if (active) router.replace(destination as any);
       } catch (cause: any) {
         if (active) setError(cause?.message || 'Could not complete sign-in. Request a new confirmation link.');
       }

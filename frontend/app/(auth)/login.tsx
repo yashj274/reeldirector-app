@@ -10,8 +10,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api, friendlyAuthError } from '@/src/api';
 import { theme } from '@/src/theme';
+import { useT } from '@/src/i18n';
 
 export default function Login() {
+  const t = useT();
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -42,14 +44,14 @@ export default function Login() {
           style={{ flex: 1, justifyContent: 'flex-end', padding: 24 }}
         >
           <Text style={styles.brand}>ReelDirector</Text>
-          <Text style={styles.title}>Welcome back</Text>
-          <Text style={styles.sub}>Sign in to keep directing.</Text>
+          <Text style={styles.title}>{t('welcome_back')}</Text>
+          <Text style={styles.sub}>{t('signin_subtitle')}</Text>
 
           <View style={styles.input}>
             <TextInput
               value={email}
               onChangeText={setEmail}
-              placeholder="Email"
+              placeholder={t('email')}
               placeholderTextColor={theme.color.onSurface3}
               autoCapitalize="none"
               keyboardType="email-address"
@@ -61,7 +63,7 @@ export default function Login() {
             <TextInput
               value={password}
               onChangeText={setPassword}
-              placeholder="Password"
+              placeholder={t('password')}
               placeholderTextColor={theme.color.onSurface3}
               secureTextEntry
               style={styles.text}
@@ -69,14 +71,18 @@ export default function Login() {
             />
           </View>
 
+          <Pressable style={styles.forgot} onPress={() => router.push('/(auth)/reset-password' as any)} testID="login-forgot-password">
+            <Text style={styles.forgotText}>{t('forgot_password')}</Text>
+          </Pressable>
+
           {err && <Text style={styles.err} testID="login-error">{err}</Text>}
 
           <Pressable style={styles.primary} onPress={submit} disabled={busy} testID="login-submit-button">
-            {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryText}>Sign in</Text>}
+            {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryText}>{t('sign_in')}</Text>}
           </Pressable>
 
           <Pressable onPress={() => router.push('/(auth)/signup')} testID="login-goto-signup">
-            <Text style={styles.link}>New here? <Text style={{ color: theme.color.brand }}>Create an account</Text></Text>
+            <Text style={styles.link}>{t('new_here')} <Text style={{ color: theme.color.brand }}>{t('create_account')}</Text></Text>
           </Pressable>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -101,5 +107,7 @@ const styles = StyleSheet.create({
   },
   primaryText: { color: '#fff', fontSize: 16, fontWeight: '700' },
   link: { color: theme.color.onSurface2, textAlign: 'center', marginTop: 20 },
+  forgot: { alignSelf: 'flex-end', paddingVertical: 3 },
+  forgotText: { color: theme.color.brand, fontSize: 13, fontWeight: '600' },
   err: { color: theme.color.error, marginBottom: 8 },
 });
