@@ -36,7 +36,7 @@ export default function ProjectDetail() {
       const result = await api.storyboard(id);
       await load();
       setStoryboardNotice(result?.ai_generated === false
-        ? 'Gemini did not return an AI script. This version is built around your description and available scene scan; you can retry the AI version when the service responds.'
+        ? 'This script is tailored to your description and the scene scan, if available. You can edit every shot or retry the AI custom script.'
         : '');
     } catch (e: any) {
       console.warn(e);
@@ -86,7 +86,7 @@ export default function ProjectDetail() {
           {(storyboardNotice || proj.storyboard_ai_generated === false) && (
             <View style={styles.storyboardNoticeBox} accessibilityRole="alert">
               <Text style={styles.storyboardNotice}>
-                {storyboardNotice || 'Gemini did not return an AI script. This version is built around your description and available scene scan.'}
+                {storyboardNotice || 'This script is tailored to your description and the scene scan, if available. You can edit every shot or retry the AI custom script.'}
               </Text>
               {captured > 0 && <Text style={styles.retryStoryboardHelp}>Your {captured} recorded {captured === 1 ? 'clip stays' : 'clips stay'} saved and linked by shot number. Review them against the refreshed shot list.</Text>}
               <Pressable onPress={doStoryboard} disabled={generating} style={styles.retryStoryboard} testID="project-retry-ai-storyboard">
