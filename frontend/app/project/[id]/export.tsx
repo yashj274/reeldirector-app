@@ -924,6 +924,8 @@ export default function Export() {
                       text={project?.storyboard?.[shot]?.on_screen_text || ''}
                       selected={shot === activeShot}
                       enabled={settings.captions_enabled}
+                      onTiming={(values, record) => updateCaption(shot, values, record)}
+                      onTimingStart={() => pushHistory(settingsRef.current)}
                       onSelect={() => { selectClip(shot); openTool('Captions'); }}
                     />
                   );
@@ -1208,12 +1210,53 @@ function TimelineClip({ clip, shot, duration, edit, selected, onSelect, onTrim }
   );
 }
 
-function TimelineCaption({ duration, edit, caption, text, selected, enabled, onSelect }: {
-  duration: number; edit: ClipEdit; caption: CaptionEdit; text: string; selected: boolean; enabled: boolean; onSelect: () => void;
+function TimelineCaption({ duration, edit, caption, text, selected, enabled, onTiming, onTimingStart, onSelect }: {
+  duration: number; edit: ClipEdit; caption: CaptionEdit; text: string; selected: boolean; enabled: boolean;
+  onTiming: (values: Partial<CaptionEdit>, recordHistory?: boolean) => void; onTimingStart: () => void; onSelect: () => void;
 }) {
   const width = Math.min(220, Math.max(96, duration * 26));
+  const clipWindow = Math.max(0.25, edit.trim_end_seconds - edit.trim_start_seconds);
   const left = Math.max(0, Math.min(width - 4, (edit.trim_start_seconds + caption.start_seconds) / duration * width));
   const right = Math.max(left + 4, Math.min(width, (edit.trim_start_seconds + caption.end_seconds) / duration * width));
+  const captionRef = useRef(caption);
+  const metricsRef = useRef({ width, duration, clipWindow });
+  const timingRef = useRef(onTiming);
+  const timingStartRef = useRef(onTimingStart);
+  const dragBase = useRef({ start: caption.start_seconds, end: caption.end_seconds });
+  captionRef.current = caption;
+  metricsRef.current = { width, duration, clipWindow };
+  timingRef.current = onTiming;
+  timingStartRef.current = onTimingStart;
+  const startHandle = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: (_event, gesture) => Math.abs(gesture.dx) > 1,
+    onPanResponderGrant: () => {
+      dragBase.current = { start: captionRef.current.start_seconds, end: captionRef.current.end_seconds };
+      timingStartRef.current();
+    },
+    onPanResponderMove: (_event, gesture) => {
+      const metrics = metricsRef.current;
+      const change = gesture.dx * metrics.duration / Math.max(1, metrics.width);
+      const start = Math.max(0, Math.min(dragBase.current.end - 0.15, dragBase.current.start + change));
+      timingRef.current({ start_seconds: Math.round(start * 10) / 10 }, false);
+    },
+    onPanResponderTerminationRequest: () => false,
+  })).current;
+  const endHandle = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: (_event, gesture) => Math.abs(gesture.dx) > 1,
+    onPanResponderGrant: () => {
+      dragBase.current = { start: captionRef.current.start_seconds, end: captionRef.current.end_seconds };
+      timingStartRef.current();
+    },
+    onPanResponderMove: (_event, gesture) => {
+      const metrics = metricsRef.current;
+      const change = gesture.dx * metrics.duration / Math.max(1, metrics.width);
+      const end = Math.max(dragBase.current.start + 0.15, Math.min(metrics.clipWindow, dragBase.current.end + change));
+      timingRef.current({ end_seconds: Math.round(end * 10) / 10 }, false);
+    },
+    onPanResponderTerminationRequest: () => false,
+  })).current;
   return (
     <Pressable
       onPress={onSelect}
@@ -1223,7 +1266,9 @@ function TimelineCaption({ duration, edit, caption, text, selected, enabled, onS
     >
       <View style={styles.captionTimelineBase} />
       {!!text && <View style={[styles.captionTimelineSegment, { left, width: Math.max(4, right - left) }]}>
-        <Text numberOfLines={1} style={styles.captionTimelineText}>{text}</Text>
+        <View {...startHandle.panHandlers} style={styles.captionTimelineHandle} accessibilityLabel="Drag to change caption start time" />
+        <Text pointerEvents="none" numberOfLines={1} style={styles.captionTimelineText}>{text}</Text>
+        <View {...endHandle.panHandlers} style={styles.captionTimelineHandle} accessibilityLabel="Drag to change caption end time" />
       </View>}
       {!text && <Text style={styles.captionNoText}>No caption</Text>}
       {selected && !!text && <Text style={styles.captionTimelineRange}>{caption.start_seconds.toFixed(1)}–{caption.end_seconds.toFixed(1)}s</Text>}
@@ -1325,8 +1370,9 @@ const styles = StyleSheet.create({
   captionTimelineCell: { height: 37, borderRadius: 4, overflow: 'hidden', backgroundColor: '#292B32', justifyContent: 'center' },
   captionTimelineCellSelected: { borderWidth: 1, borderColor: '#F1F1F4' },
   captionTimelineBase: { ...StyleSheet.absoluteFillObject, backgroundColor: '#2A2C33' },
-  captionTimelineSegment: { position: 'absolute', top: 6, bottom: 6, minWidth: 6, borderRadius: 3, paddingHorizontal: 4, justifyContent: 'center', overflow: 'hidden', backgroundColor: '#9C2856' },
-  captionTimelineText: { color: '#fff', fontSize: 8, fontWeight: '700' }, captionTimelineRange: { position: 'absolute', bottom: 1, right: 4, color: '#D1D2D8', fontSize: 7, fontVariant: ['tabular-nums'] },
+  captionTimelineSegment: { position: 'absolute', top: 6, bottom: 6, minWidth: 6, borderRadius: 3, justifyContent: 'center', overflow: 'hidden', flexDirection: 'row', alignItems: 'center', backgroundColor: '#9C2856' },
+  captionTimelineHandle: { width: 11, height: '100%', backgroundColor: 'rgba(255,255,255,0.82)' },
+  captionTimelineText: { flex: 1, color: '#fff', fontSize: 8, fontWeight: '700', textAlign: 'center' }, captionTimelineRange: { position: 'absolute', bottom: 1, right: 4, color: '#D1D2D8', fontSize: 7, fontVariant: ['tabular-nums'] },
   captionNoText: { color: '#858790', fontSize: 9, textAlign: 'center' }, captionTrackEmpty: { color: '#9C9EA5', textAlign: 'center', fontSize: 10 },
   captionTimingRow: { minHeight: 52, paddingHorizontal: 8, borderRadius: 10, backgroundColor: '#24262D', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, captionTimingDivider: { height: 24, width: 1, backgroundColor: '#41434A' },
   addClip: { width: 47, height: 47, borderRadius: 10, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', marginHorizontal: 6 },
