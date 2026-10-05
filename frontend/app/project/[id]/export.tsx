@@ -25,6 +25,16 @@ type ClipEdit = {
   brightness: number;
 };
 
+type CaptionEdit = {
+  shot_index: number;
+  start_seconds: number;
+  end_seconds: number;
+  position_x: number;
+  position_y: number;
+  size: string;
+  font: string;
+};
+
 type EditorSettings = {
   aspect_ratio: string;
   fit_mode: string;
@@ -39,8 +49,10 @@ type EditorSettings = {
   title_color: string;
   title_size: string;
   music_volume: number;
+  voiceover_volume: number;
   original_volume: number;
   captions_enabled: boolean;
+  caption_edits: CaptionEdit[];
 };
 
 type ToolName = 'Audio' | 'Text' | 'Voice' | 'Captions' | 'Overlay' | 'Filter' | 'Export settings';
@@ -65,8 +77,13 @@ const DEFAULT_SETTINGS: EditorSettings = {
   aspect_ratio: '9:16', fit_mode: 'fill', resolution: '1080p', fps: 30, editing_style: 'cinematic',
   clip_order: [], clip_edits: [], title_text: '', title_font: 'sans',
   title_position: 'bottom', title_color: 'white', title_size: 'medium',
-  music_volume: 25, original_volume: 80, captions_enabled: false,
+  music_volume: 25, voiceover_volume: 100, original_volume: 80, captions_enabled: false, caption_edits: [],
 };
+
+const CAPTION_FONTS = [
+  ['sans', 'Sans'], ['serif', 'Serif'], ['mono', 'Mono'],
+  ['bold', 'Bold'], ['condensed', 'Condensed'], ['serif_bold', 'Serif bold'],
+];
 
 const FILTERS: Record<string, string> = {
   warm: 'sepia(0.16) saturate(1.12)', cool: 'hue-rotate(9deg) saturate(1.06)',
@@ -82,6 +99,12 @@ const TITLE_COLORS: Record<string, string> = { white: '#fff', gold: '#F5C869', p
 function shotIndex(clip: any, fallback: number) {
   const value = Number(clip?.shot_index);
   return Number.isInteger(value) ? value : fallback;
+}
+
+function fontFamily(font: string) {
+  return ({
+    serif: 'Georgia', mono: 'Courier New', bold: 'Arial', condensed: 'Arial Narrow', serif_bold: 'Georgia',
+  } as Record<string, string>)[font];
 }
 
 function makeSettings(project: any): EditorSettings {
@@ -108,14 +131,40 @@ function makeSettings(project: any): EditorSettings {
       brightness: Math.max(-0.5, Math.min(0.5, Number(old?.brightness ?? clip?.brightness) || 0)),
     };
   });
+  const captionEdits = clips.map((clip: any, index: number) => {
+    const id = shotIndex(clip, index);
+    const clipEdit = clipEdits.find((edit: ClipEdit) => edit.shot_index === id)!;
+    const clipWindow = Math.max(0.25, clipEdit.trim_end_seconds - clipEdit.trim_start_seconds);
+    const old = Array.isArray(saved.caption_edits)
+      ? saved.caption_edits.find((edit: any) => edit.shot_index === id) : null;
+    const oldStart = Number(old?.start_seconds);
+    const oldEnd = Number(old?.end_seconds);
+    const oldX = Number(old?.position_x);
+    const oldY = Number(old?.position_y);
+    const start = Math.max(0, Math.min(clipWindow - 0.15, Number.isFinite(oldStart) ? oldStart : 0));
+    const end = Math.max(start + 0.15, Math.min(clipWindow, Number.isFinite(oldEnd) && oldEnd > 0 ? oldEnd : clipWindow));
+    return {
+      shot_index: id,
+      start_seconds: start,
+      end_seconds: end,
+      position_x: Math.max(0, Math.min(100, Number.isFinite(oldX) ? oldX : 50)),
+      position_y: Math.max(0, Math.min(100, Number.isFinite(oldY) ? oldY : 84)),
+      size: ['small', 'medium', 'large'].includes(old?.size) ? old.size : 'medium',
+      font: CAPTION_FONTS.some(([font]) => font === old?.font) ? old.font : 'sans',
+    };
+  });
   const musicVolume = Number(saved.music_volume);
+  const voiceoverVolume = Number(saved.voiceover_volume);
   const originalVolume = Number(saved.original_volume);
   return {
     ...DEFAULT_SETTINGS,
     ...saved,
+    title_font: CAPTION_FONTS.some(([font]) => font === saved.title_font) ? saved.title_font : 'sans',
     music_volume: Number.isFinite(musicVolume) ? (musicVolume <= 1 ? musicVolume * 100 : musicVolume) : DEFAULT_SETTINGS.music_volume,
+    voiceover_volume: Number.isFinite(voiceoverVolume) ? (voiceoverVolume <= 1 ? voiceoverVolume * 100 : voiceoverVolume) : DEFAULT_SETTINGS.voiceover_volume,
     original_volume: Number.isFinite(originalVolume) ? (originalVolume <= 1 ? originalVolume * 100 : originalVolume) : DEFAULT_SETTINGS.original_volume,
     captions_enabled: saved.captions_enabled === true,
+    caption_edits: captionEdits,
     clip_order: clipOrder,
     clip_edits: clipEdits,
   };
@@ -146,15 +195,20 @@ export default function Export() {
   const [toolError, setToolError] = useState('');
   const [audioBusy, setAudioBusy] = useState(false);
   const [recordingVoice, setRecordingVoice] = useState(false);
+  const [captionPositionMode, setCaptionPositionMode] = useState(false);
+  const [captionLayout, setCaptionLayout] = useState({ width: 0, height: 0 });
   const [addingClip, setAddingClip] = useState(false);
   const [addClipError, setAddClipError] = useState('');
   const historyBack = useRef<EditorSettings[]>([]);
   const historyForward = useRef<EditorSettings[]>([]);
+  const editorScrollRef = useRef<ScrollView | null>(null);
   const desiredTime = useRef(0);
   const autoAdvance = useRef(false);
   const initialLoadComplete = useRef(false);
   const dirtyRef = useRef(dirty);
   const selectedShotRef = useRef(selectedShot);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
   dirtyRef.current = dirty;
   selectedShotRef.current = selectedShot;
   const rot = useRef(new Animated.Value(0)).current;
@@ -193,6 +247,7 @@ export default function Export() {
           ...next, ...current,
           clip_order: [...current.clip_order, ...next.clip_order.filter((shot) => !current.clip_order.includes(shot))],
           clip_edits: [...current.clip_edits, ...next.clip_edits.filter((edit) => !knownShots.has(edit.shot_index))],
+          caption_edits: [...current.caption_edits, ...next.caption_edits.filter((edit) => !current.caption_edits.some((saved) => saved.shot_index === edit.shot_index))],
         };
       });
       setRenderError('');
@@ -234,6 +289,12 @@ export default function Export() {
   const activeTrimStart = activeEdit?.trim_start_seconds || 0;
   const activeSourceDuration = Number(activeClip?.duration_seconds) || 0;
   const captionText = activeStoryboard?.on_screen_text || '';
+  const activeCaption = settings.caption_edits.find((edit) => edit.shot_index === activeShot)
+    || { shot_index: activeShot, start_seconds: 0, end_seconds: Math.max(0.25, activeClipEnd - activeTrimStart), position_x: 50, position_y: 84, size: 'medium', font: 'sans' };
+  const captionLocalTime = Math.max(0, currentTime - activeTrimStart);
+  const captionIsInTime = captionLocalTime >= activeCaption.start_seconds && captionLocalTime <= activeCaption.end_seconds;
+  const captionValuesRef = useRef(activeCaption);
+  captionValuesRef.current = activeCaption;
   const activeFilter = activeEdit?.filter_preset || 'original';
   const activeIndex = activeClip ? orderedClips.indexOf(activeClip) : -1;
   const nextIncludedClip = orderedClips.slice(activeIndex + 1).find((clip: any, index: number) => editForShot(settings, shotIndex(clip, activeIndex + 1 + index)).included);
@@ -248,6 +309,11 @@ export default function Export() {
   }, 0) + Math.max(0, currentTime - (activeEdit?.trim_start_seconds || 0));
   const webPreviewFilter = [FILTERS[activeFilter], FILTERS[settings.editing_style], activeEdit ? `brightness(${1 + activeEdit.brightness})` : null].filter(Boolean).join(' ');
   const spin = rot.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  const previewHeight = Math.max(235, Math.min(windowHeight * 0.47, 490));
+  const [ratioWidth, ratioHeight] = settings.aspect_ratio.split(':').map(Number);
+  const outputRatio = ratioWidth > 0 && ratioHeight > 0 ? ratioWidth / ratioHeight : 9 / 16;
+  const previewMediaWidth = Math.min(windowWidth, previewHeight * outputRatio);
+  const previewMediaHeight = Math.min(previewHeight, windowWidth / outputRatio);
 
   const player = useVideoPlayer(activeClip?.video_url || null, (videoPlayer) => {
     videoPlayer.loop = false;
@@ -328,13 +394,67 @@ export default function Export() {
   const updateClip = (shot: number, values: Partial<ClipEdit>) => {
     setSettings((current) => {
       pushHistory(current);
+      const clipEdits = current.clip_edits.map((edit) => edit.shot_index === shot ? { ...edit, ...values } : edit);
+      const clipEdit = clipEdits.find((edit) => edit.shot_index === shot);
+      const caption_edits = clipEdit
+        ? current.caption_edits.map((caption) => {
+          if (caption.shot_index !== shot) return caption;
+          const available = Math.max(0.25, clipEdit.trim_end_seconds - clipEdit.trim_start_seconds);
+          const start = Math.max(0, Math.min(available - 0.15, caption.start_seconds));
+          return { ...caption, start_seconds: start, end_seconds: Math.max(start + 0.15, Math.min(available, caption.end_seconds)) };
+        })
+        : current.caption_edits;
       return {
         ...current,
-        clip_edits: current.clip_edits.map((edit) => edit.shot_index === shot ? { ...edit, ...values } : edit),
+        clip_edits: clipEdits,
+        caption_edits,
       };
     });
     setDirty(true);
     setNotice('');
+  };
+
+  const updateCaption = (shot: number, values: Partial<CaptionEdit>, recordHistory = true) => {
+    setSettings((current) => {
+      if (recordHistory) pushHistory(current);
+      const existing = current.caption_edits.find((edit) => edit.shot_index === shot);
+      const fallback = { ...activeCaption, shot_index: shot };
+      const next = { ...(existing || fallback), ...values, shot_index: shot };
+      return {
+        ...current,
+        caption_edits: existing
+          ? current.caption_edits.map((edit) => edit.shot_index === shot ? next : edit)
+          : [...current.caption_edits, next],
+      };
+    });
+    setDirty(true);
+    setNotice('');
+  };
+  const updateCaptionRef = useRef(updateCaption);
+  updateCaptionRef.current = updateCaption;
+  const captionDragOrigin = useRef({ x: 50, y: 84 });
+  const captionPanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => captionPositionMode,
+    onMoveShouldSetPanResponder: (_event, gesture) => captionPositionMode && (Math.abs(gesture.dx) > 2 || Math.abs(gesture.dy) > 2),
+    onPanResponderGrant: () => {
+      captionDragOrigin.current = { x: captionValuesRef.current.position_x, y: captionValuesRef.current.position_y };
+      pushHistory(settingsRef.current);
+    },
+    onPanResponderMove: (_event, gesture) => {
+      const x = Math.max(0, Math.min(100, captionDragOrigin.current.x + gesture.dx / Math.max(1, previewMediaWidth - captionLayout.width) * 100));
+      const y = Math.max(0, Math.min(100, captionDragOrigin.current.y + gesture.dy / Math.max(1, previewMediaHeight - captionLayout.height) * 100));
+      updateCaptionRef.current(activeShot, { position_x: x, position_y: y }, false);
+    },
+    onPanResponderTerminationRequest: () => false,
+  }), [activeShot, captionLayout.height, captionLayout.width, captionPositionMode, previewMediaHeight, previewMediaWidth]);
+
+  const adjustCaptionTime = (field: 'start_seconds' | 'end_seconds', delta: number) => {
+    const duration = Math.max(0.25, (activeEdit?.trim_end_seconds || 0) - (activeEdit?.trim_start_seconds || 0));
+    if (field === 'start_seconds') {
+      updateCaption(activeShot, { start_seconds: Math.max(0, Math.min(activeCaption.end_seconds - 0.15, Math.round((activeCaption.start_seconds + delta) * 10) / 10)) });
+    } else {
+      updateCaption(activeShot, { end_seconds: Math.max(activeCaption.start_seconds + 0.15, Math.min(duration, Math.round((activeCaption.end_seconds + delta) * 10) / 10)) });
+    }
   };
 
   const undo = () => {
@@ -359,6 +479,7 @@ export default function Export() {
 
   const selectClip = (shot: number) => {
     autoAdvance.current = false;
+    setCaptionPositionMode(false);
     setSelectedShot(shot);
     const edit = editForShot(settings, shot);
     desiredTime.current = edit.trim_start_seconds;
@@ -381,6 +502,27 @@ export default function Export() {
         setCurrentTime(activeEdit?.trim_start_seconds || 0);
       }
       player.play();
+      setPlaying(true);
+    }
+  };
+
+  const playFullReel = () => {
+    const firstClip = orderedClips.find((clip: any, index: number) => editForShot(settings, shotIndex(clip, index)).included && !!clip.video_url);
+    if (!firstClip) return;
+    const firstShot = shotIndex(firstClip, orderedClips.indexOf(firstClip));
+    const start = editForShot(settings, firstShot).trim_start_seconds;
+    autoAdvance.current = false;
+    setCaptionPositionMode(false);
+    if (player.playing) player.pause();
+    desiredTime.current = start;
+    setCurrentTime(start);
+    if (firstShot === activeShot) {
+      player.currentTime = start;
+      player.play();
+      setPlaying(true);
+    } else {
+      autoAdvance.current = true;
+      setSelectedShot(firstShot);
       setPlaying(true);
     }
   };
@@ -478,6 +620,7 @@ export default function Export() {
   };
 
   const openTool = (name: ToolName) => {
+    setCaptionPositionMode(false);
     setToolError('');
     setTool(name);
   };
@@ -504,9 +647,31 @@ export default function Export() {
     } finally { setAudioBusy(false); }
   };
 
+  const chooseVoiceover = async () => {
+    if (!id) return;
+    setToolError('');
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: 'audio/*', copyToCacheDirectory: true, multiple: false });
+      const file = result.assets?.[0];
+      if (result.canceled || !file) return;
+      if (file.size && file.size > 25 * 1024 * 1024) {
+        setToolError('Choose a voice recording smaller than 25 MB.');
+        return;
+      }
+      setAudioBusy(true);
+      const saved = await api.saveVoiceover(id, {
+        uri: file.uri, name: file.name, mimeType: file.mimeType || undefined, file: file.file || undefined,
+      });
+      setProject((current: any) => ({ ...current, voiceover: saved }));
+      setNotice('Voiceover added as a separate track');
+    } catch (error: any) {
+      setToolError(error.message || 'Could not add this voice recording.');
+    } finally { setAudioBusy(false); }
+  };
+
   const removeAudio = () => {
     if (!id) return;
-    Alert.alert('Remove audio track?', 'This will remove the music or voice recording from this reel.', [
+    Alert.alert('Remove music track?', 'Your separate voiceover track will stay in the reel.', [
       { text: 'Keep it', style: 'cancel' },
       { text: 'Remove', style: 'destructive', onPress: async () => {
         setAudioBusy(true);
@@ -522,14 +687,7 @@ export default function Export() {
 
   const startVoiceRecording = async () => {
     setToolError('');
-    if (project?.soundtrack?.storage_path) {
-      Alert.alert('Replace the current audio?', 'This editor currently exports one audio track. Saving a voice recording will replace the music track.', [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Continue', onPress: () => { void beginRecording(); } },
-      ]);
-    } else {
-      await beginRecording();
-    }
+    await beginRecording();
   };
 
   const beginRecording = async () => {
@@ -554,14 +712,30 @@ export default function Export() {
       const audioBlob = Platform.OS === 'web' ? await fetch(uri).then((response) => response.blob()) : undefined;
       const mimeType = audioBlob?.type || 'audio/mp4';
       const extension = mimeType.includes('webm') ? 'webm' : mimeType.includes('mpeg') ? 'mp3' : 'm4a';
-      const saved = await api.saveSoundtrack(id, {
+      const saved = await api.saveVoiceover(id, {
         uri, name: `voiceover-${Date.now()}.${extension}`, mimeType, file: audioBlob,
       });
-      setProject((current: any) => ({ ...current, soundtrack: saved }));
-      setNotice('Voice recording added as the reel audio track');
+      setProject((current: any) => ({ ...current, voiceover: saved }));
+      setNotice('Voiceover added as a separate track');
     } catch (error: any) {
       setToolError(error.message || 'Could not save your voice recording.');
     } finally { setAudioBusy(false); }
+  };
+
+  const removeVoiceover = () => {
+    if (!id) return;
+    Alert.alert('Remove voiceover?', 'The music track will stay in your reel.', [
+      { text: 'Keep it', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: async () => {
+        setAudioBusy(true);
+        try {
+          await api.removeVoiceover(id);
+          setProject((current: any) => ({ ...current, voiceover: null }));
+          setNotice('Voiceover removed');
+        } catch (error: any) { setToolError(error.message || 'Could not remove the voiceover.'); }
+        finally { setAudioBusy(false); }
+      } },
+    ]);
   };
 
   const estimatedDuration = orderedClips.reduce((total: number, clip: any, index: number) => {
@@ -569,11 +743,6 @@ export default function Export() {
     return edit.included ? total + Math.max(0, edit.trim_end_seconds - edit.trim_start_seconds) : total;
   }, 0) * (settings.editing_style === 'fast_pace' ? 0.8 : 1);
   const includedCount = orderedClips.filter((clip: any, index: number) => editForShot(settings, shotIndex(clip, index)).included).length;
-  const previewHeight = Math.max(235, Math.min(windowHeight * 0.47, 490));
-  const [ratioWidth, ratioHeight] = settings.aspect_ratio.split(':').map(Number);
-  const outputRatio = ratioWidth > 0 && ratioHeight > 0 ? ratioWidth / ratioHeight : 9 / 16;
-  const previewMediaWidth = Math.min(windowWidth, previewHeight * outputRatio);
-  const previewMediaHeight = Math.min(previewHeight, windowWidth / outputRatio);
 
   return (
     <View style={styles.root} testID="export-screen">
@@ -599,7 +768,7 @@ export default function Export() {
         </View>
       </SafeAreaView>
 
-      <ScrollView style={styles.editorScroll} contentContainerStyle={styles.editorBody} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+      <ScrollView ref={editorScrollRef} style={styles.editorScroll} contentContainerStyle={styles.editorBody} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
         <View style={[styles.preview, { height: previewHeight }]}>
           <View style={[styles.previewMedia, { width: previewMediaWidth, height: previewMediaHeight }]}>
             {activeClip?.frame_url ? <Image source={{ uri: activeClip.frame_url }} style={StyleSheet.absoluteFill} contentFit="contain" /> : null}
@@ -627,20 +796,50 @@ export default function Export() {
               <View pointerEvents="none" style={[styles.titleOverlay, settings.title_position === 'top' ? styles.titleTop : settings.title_position === 'center' ? styles.titleCenter : styles.titleBottom]}>
                 <Text numberOfLines={2} style={[
                   styles.previewTitle,
-                  { color: TITLE_COLORS[settings.title_color] || '#fff', fontFamily: settings.title_font === 'serif' ? 'Georgia' : settings.title_font === 'mono' ? 'Courier New' : undefined,
-                    fontSize: settings.title_size === 'large' ? 23 : settings.title_size === 'small' ? 14 : 18 },
+                  { color: TITLE_COLORS[settings.title_color] || '#fff', fontFamily: fontFamily(settings.title_font),
+                    fontSize: settings.title_size === 'large' ? 23 : settings.title_size === 'small' ? 14 : 18,
+                    fontWeight: settings.title_font === 'bold' || settings.title_font === 'serif_bold' ? '900' : '800' },
                   settings.title_color === 'black' && styles.previewTitleDark,
                 ]}>{settings.title_text}</Text>
               </View>
             )}
-            {settings.captions_enabled && !!captionText && (
-              <View pointerEvents="none" style={styles.captionOverlay}><Text numberOfLines={2} style={styles.captionText}>{captionText}</Text></View>
+            {settings.captions_enabled && !!captionText && (captionIsInTime || captionPositionMode) && (
+              <View
+                {...(captionPositionMode ? captionPanResponder.panHandlers : {})}
+                onLayout={(event) => {
+                  const { width, height } = event.nativeEvent.layout;
+                  if (Math.abs(width - captionLayout.width) > 1 || Math.abs(height - captionLayout.height) > 1) setCaptionLayout({ width, height });
+                }}
+                style={[
+                  styles.captionOverlay,
+                  {
+                    left: Math.max(0, (previewMediaWidth - captionLayout.width) * activeCaption.position_x / 100),
+                    top: Math.max(0, (previewMediaHeight - captionLayout.height) * activeCaption.position_y / 100),
+                    maxWidth: previewMediaWidth * 0.92,
+                  },
+                  captionPositionMode && styles.captionOverlayEditing,
+                ]}
+              >
+                <Text numberOfLines={3} style={[
+                  styles.captionText,
+                  {
+                    fontSize: activeCaption.size === 'large' ? 22 : activeCaption.size === 'small' ? 12 : 16,
+                    fontFamily: fontFamily(activeCaption.font),
+                    fontWeight: activeCaption.font === 'bold' || activeCaption.font === 'serif_bold' ? '900' : '700',
+                  },
+                ]}>{captionText}</Text>
+              </View>
             )}
           </View>
           <View style={styles.previewTopRow}>
             {!!activeFilter && activeFilter !== 'original' ? <Text style={styles.previewBadge}>{activeFilter.replace('_', ' ')}</Text> : <View />}
-            <Text style={styles.previewCounter}>{activeClip ? `CLIP ${Math.max(0, orderedClips.indexOf(activeClip)) + 1} / ${orderedClips.length}` : 'PREVIEW'}</Text>
+            <Text style={styles.previewCounter}>{activeClip ? `REEL · SHOT ${Math.max(0, orderedClips.indexOf(activeClip)) + 1} / ${orderedClips.length}` : 'REEL PREVIEW'}</Text>
           </View>
+          {captionPositionMode ? (
+            <Pressable style={styles.captionPositionPill} onPress={() => setCaptionPositionMode(false)}>
+              <Ionicons name="move" size={14} color="#fff" /><Text style={styles.captionPositionText}>Drag caption · Done</Text>
+            </Pressable>
+          ) : null}
           {!!rendering && (
             <View style={styles.renderingPill}>
               <Animated.View style={{ transform: [{ rotate: spin }] }}><Ionicons name="sync" size={16} color="#fff" /></Animated.View>
@@ -654,7 +853,9 @@ export default function Export() {
             <Ionicons name={playing ? 'pause' : 'play'} size={21} color="#fff" />
           </Pressable>
           <Text style={styles.timecode}>{clock(timelinePosition)}<Text style={styles.timeDivider}> / </Text>{clock(fullTimelineDuration)}</Text>
-          <View style={styles.transportSpacer} />
+          <Pressable style={styles.fullReelButton} onPress={playFullReel} accessibilityLabel="Play full reel from the beginning">
+            <Ionicons name="play" size={12} color="#fff" /><Text style={styles.fullReelButtonText}>Full reel</Text>
+          </Pressable>
           <Pressable style={styles.roundControl} onPress={undo} disabled={!historyBack.current.length} accessibilityLabel="Undo edit">
             <Ionicons name="arrow-undo" size={19} color={historyBack.current.length ? '#fff' : '#686A72'} />
           </Pressable>
@@ -700,18 +901,53 @@ export default function Export() {
               </Pressable>
             )}
           </View>
-          <Pressable style={styles.trackRow} onPress={() => openTool('Audio')} accessibilityLabel="Edit audio track">
+          <View style={styles.captionTrackHeader}>
+            <Ionicons name="chatbox-ellipses-outline" size={15} color="#B9BBC3" />
+            <Text style={styles.captionTrackTitle}>CAPTION TIMING</Text>
+            <Text style={styles.trackTag}>Tap a segment to edit</Text>
+          </View>
+          <View style={styles.captionTrack}>
+            {orderedClips.length ? (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.captionStrip}>
+                {orderedClips.map((clip: any, index: number) => {
+                  const shot = shotIndex(clip, index);
+                  const duration = Math.max(0.5, Number(clip.duration_seconds) || 5);
+                  const edit = editForShot(settings, shot);
+                  const caption = settings.caption_edits.find((item) => item.shot_index === shot)
+                    || { shot_index: shot, start_seconds: 0, end_seconds: Math.max(0.25, edit.trim_end_seconds - edit.trim_start_seconds), position_x: 50, position_y: 84, size: 'medium', font: 'sans' };
+                  return (
+                    <TimelineCaption
+                      key={`caption-${shot}`}
+                      duration={duration}
+                      edit={edit}
+                      caption={caption}
+                      text={project?.storyboard?.[shot]?.on_screen_text || ''}
+                      selected={shot === activeShot}
+                      enabled={settings.captions_enabled}
+                      onSelect={() => { selectClip(shot); openTool('Captions'); }}
+                    />
+                  );
+                })}
+              </ScrollView>
+            ) : <Text style={styles.captionTrackEmpty}>Caption timing will appear after you add clips</Text>}
+          </View>
+          <Pressable style={styles.trackRow} onPress={() => openTool('Audio')} accessibilityLabel="Edit music track">
             <Ionicons name="musical-notes" size={17} color="#B9BBC3" />
-            <Text style={styles.trackPlaceholder} numberOfLines={1}>{project?.soundtrack?.title || 'Tap to add audio'}</Text>
-            {!!project?.soundtrack?.title && <Text style={styles.trackTag}>AUDIO</Text>}
+            <Text style={styles.trackPlaceholder} numberOfLines={1}>{project?.soundtrack?.title || 'Tap to add music'}</Text>
+            {!!project?.soundtrack?.title && <Text style={styles.trackTag}>MUSIC</Text>}
           </Pressable>
-          <Pressable style={styles.trackRow} onPress={() => openTool('Text')} accessibilityLabel="Edit text track">
+          <Pressable style={styles.trackRow} onPress={() => openTool('Voice')} accessibilityLabel="Edit voiceover track">
+            <Ionicons name="mic-outline" size={17} color="#B9BBC3" />
+            <Text style={styles.trackPlaceholder} numberOfLines={1}>{project?.voiceover?.title || 'Tap to add voiceover'}</Text>
+            {!!project?.voiceover?.title && <Text style={styles.trackTag}>VOICE</Text>}
+          </Pressable>
+          <Pressable style={styles.trackRow} onPress={() => openTool('Text')} accessibilityLabel="Edit title text track">
             <Text style={styles.trackAa}>Aa</Text>
             <Text style={styles.trackPlaceholder} numberOfLines={1}>{settings.title_text || 'Tap to add text'}</Text>
-            {!!settings.captions_enabled && <Text style={styles.trackTag}>CAPTIONS</Text>}
+            {!!settings.title_text && <Text style={styles.trackTag}>TITLE</Text>}
           </Pressable>
           {orderedClips.length ? <View pointerEvents="none" style={styles.playhead} /> : null}
-          <Text style={styles.timelineHint}>Drag a clip edge to trim · Tap a clip to preview</Text>
+          <Text style={styles.timelineHint}>Play to preview the full reel · Tap a caption segment to set its timing</Text>
         </View>
 
         {(!!renderError || !!addClipError) ? <Text style={styles.inlineError} accessibilityRole="alert">{renderError || addClipError}</Text> : null}
@@ -733,18 +969,18 @@ export default function Export() {
       <ToolSheet visible={!!tool} title={tool || ''} onClose={() => { setTool(null); setToolError(''); }}>
         {tool === 'Audio' ? (
           <>
-            <Text style={styles.sheetDescription}>{project?.soundtrack?.title ? 'Audio is on the timeline. Adjust its level or replace it.' : 'Add a song or ambient track to your reel.'}</Text>
+            <Text style={styles.sheetDescription}>{project?.soundtrack?.title ? 'Your music stays separate from the voiceover. Adjust its level or replace the track.' : 'Add a song or ambient music. Your voiceover can be added separately.'}</Text>
             <View style={styles.audioTrackCard}>
               <View style={styles.audioIcon}><Ionicons name="musical-notes" size={21} color="#fff" /></View>
-              <View style={{ flex: 1 }}><Text style={styles.audioTitle} numberOfLines={1}>{project?.soundtrack?.title || 'No audio added yet'}</Text><Text style={styles.audioMeta}>{project?.soundtrack?.title ? 'Audio track · starts at the beginning' : 'Choose an audio file from your device'}</Text></View>
+              <View style={{ flex: 1 }}><Text style={styles.audioTitle} numberOfLines={1}>{project?.soundtrack?.title || 'No music added yet'}</Text><Text style={styles.audioMeta}>{project?.soundtrack?.title ? 'Music track · mixed with voiceover' : 'Choose an audio file from your device'}</Text></View>
               {project?.soundtrack?.storage_path ? <Pressable onPress={removeAudio} style={styles.smallIconButton} accessibilityLabel="Remove audio"><Ionicons name="trash-outline" size={18} color="#F87171" /></Pressable> : null}
             </View>
-            <ActionButton icon="folder-open-outline" label={project?.soundtrack?.title ? 'Replace audio' : 'Choose audio'} onPress={() => void chooseAudio()} loading={audioBusy} />
-            <Text style={styles.rowLabel}>AUDIO VOLUME · {settings.music_volume}%</Text>
+            <ActionButton icon="folder-open-outline" label={project?.soundtrack?.title ? 'Replace music' : 'Choose music'} onPress={() => void chooseAudio()} loading={audioBusy} />
+            <Text style={styles.rowLabel}>MUSIC VOLUME · {settings.music_volume}%</Text>
             <VolumeControl value={settings.music_volume} onChange={(value) => update('music_volume', value)} />
             <Text style={styles.rowLabel}>CLIP SOUND · {settings.original_volume}%</Text>
             <VolumeControl value={settings.original_volume} onChange={(value) => update('original_volume', value)} />
-            <Text style={styles.sheetFootnote}>Adding a new track replaces the current audio file.</Text>
+            <Text style={styles.sheetFootnote}>Music and voiceover are saved and mixed as separate tracks.</Text>
           </>
         ) : null}
 
@@ -754,7 +990,7 @@ export default function Export() {
             <TextInput value={settings.title_text} onChangeText={(value) => update('title_text', value)} placeholder="Write your title" placeholderTextColor="#747780" maxLength={80} style={styles.titleInput} accessibilityLabel="Video title text" />
             <Text style={styles.characterCount}>{settings.title_text.length}/80</Text>
             <Text style={styles.rowLabel}>FONT</Text>
-            <ChoiceRow options={[['sans', 'Sans'], ['serif', 'Serif'], ['mono', 'Mono']]} selected={settings.title_font} onSelect={(value) => update('title_font', value)} />
+            <ChoiceRow options={CAPTION_FONTS as string[][]} selected={settings.title_font} onSelect={(value) => update('title_font', value)} />
             <Text style={styles.rowLabel}>POSITION</Text>
             <ChoiceRow options={['top', 'center', 'bottom'].map((value) => [value, value])} selected={settings.title_position} onSelect={(value) => update('title_position', value)} />
             <Text style={styles.rowLabel}>SIZE</Text>
@@ -766,7 +1002,12 @@ export default function Export() {
 
         {tool === 'Voice' ? (
           <>
-            <Text style={styles.sheetDescription}>Record narration with your phone microphone. It will become the reel’s audio track.</Text>
+            <Text style={styles.sheetDescription}>Record narration with your phone microphone. It is mixed separately with your music and clip audio.</Text>
+            <View style={styles.audioTrackCard}>
+              <View style={styles.audioIcon}><Ionicons name="mic" size={21} color="#fff" /></View>
+              <View style={{ flex: 1 }}><Text style={styles.audioTitle} numberOfLines={1}>{project?.voiceover?.title || 'No voiceover added yet'}</Text><Text style={styles.audioMeta}>{project?.voiceover?.title ? 'Voiceover track · starts at the beginning' : 'Record narration with your device microphone'}</Text></View>
+              {project?.voiceover?.storage_path ? <Pressable onPress={removeVoiceover} style={styles.smallIconButton} accessibilityLabel="Remove voiceover"><Ionicons name="trash-outline" size={18} color="#F87171" /></Pressable> : null}
+            </View>
             <View style={styles.voiceCard}>
               <View style={[styles.voicePulse, recordingVoice && styles.voicePulseRecording]}><Ionicons name={recordingVoice ? 'mic' : 'mic-outline'} size={28} color="#fff" /></View>
               <Text style={styles.voiceTitle}>{recordingVoice ? 'Recording your voice…' : 'Record a voiceover'}</Text>
@@ -776,18 +1017,41 @@ export default function Export() {
               {audioBusy ? <ActivityIndicator color="#fff" /> : <Ionicons name={recordingVoice ? 'stop' : 'mic'} size={19} color="#fff" />}
               <Text style={styles.recordButtonText}>{audioBusy ? 'Saving recording…' : recordingVoice ? 'Stop and add voiceover' : 'Start recording'}</Text>
             </Pressable>
-            <Text style={styles.sheetFootnote}>The current renderer uses one audio track, so a voiceover replaces any music already added.</Text>
+            <ActionButton icon="folder-open-outline" label="Import a voice recording" onPress={() => void chooseVoiceover()} loading={audioBusy || recordingVoice} />
+            <Text style={styles.rowLabel}>VOICEOVER VOLUME · {settings.voiceover_volume}%</Text>
+            <VolumeControl value={settings.voiceover_volume} onChange={(value) => update('voiceover_volume', value)} />
+            <Text style={styles.sheetFootnote}>Your music track stays in place when you record or remove the voiceover.</Text>
           </>
         ) : null}
 
         {tool === 'Captions' ? (
           <>
-            <Text style={styles.sheetDescription}>Show the short on-screen text from your custom shot plan. Captions are burned into the exported video.</Text>
+            <Text style={styles.sheetDescription}>Place and style this shot’s caption, then set when it appears in the trimmed clip. It is included in the finished video.</Text>
             <Pressable style={styles.toggleRow} onPress={() => update('captions_enabled', !settings.captions_enabled)}>
               <View style={{ flex: 1 }}><Text style={styles.toggleTitle}>Captions</Text><Text style={styles.toggleHint}>{settings.captions_enabled ? 'Included in the preview and export' : 'Off for this reel'}</Text></View>
               <View style={[styles.toggle, settings.captions_enabled && styles.toggleOn]}><View style={[styles.toggleKnob, settings.captions_enabled && styles.toggleKnobOn]} /></View>
             </Pressable>
             {captionText ? <View style={styles.captionSample}><Text style={styles.captionSampleLabel}>CURRENT CLIP</Text><Text style={styles.captionSampleText}>{captionText}</Text></View> : <View style={styles.captionSample}><Text style={styles.captionSampleLabel}>CURRENT CLIP</Text><Text style={styles.captionSampleTextMuted}>No caption text was added to this shot plan.</Text></View>}
+            {!!captionText && <ActionButton icon="move-outline" label="Position caption on preview" onPress={() => {
+              if (!settings.captions_enabled) update('captions_enabled', true);
+              setTool(null);
+              setCaptionPositionMode(true);
+              requestAnimationFrame(() => editorScrollRef.current?.scrollTo({ y: 0, animated: true }));
+            }} />}
+            {!!captionText && (
+              <>
+                <Text style={styles.rowLabel}>CAPTION TIMING · WITHIN THIS TRIMMED CLIP</Text>
+                <View style={styles.captionTimingRow}>
+                  <TrimControl label="IN" value={activeCaption.start_seconds} onMinus={() => adjustCaptionTime('start_seconds', -0.25)} onPlus={() => adjustCaptionTime('start_seconds', 0.25)} />
+                  <View style={styles.captionTimingDivider} />
+                  <TrimControl label="OUT" value={activeCaption.end_seconds} onMinus={() => adjustCaptionTime('end_seconds', -0.25)} onPlus={() => adjustCaptionTime('end_seconds', 0.25)} />
+                </View>
+                <Text style={styles.rowLabel}>CAPTION SIZE</Text>
+                <ChoiceRow options={['small', 'medium', 'large'].map((value) => [value, value])} selected={activeCaption.size} onSelect={(value) => updateCaption(activeShot, { size: value })} />
+                <Text style={styles.rowLabel}>CAPTION FONT</Text>
+                <ChoiceRow options={CAPTION_FONTS as string[][]} selected={activeCaption.font} onSelect={(value) => updateCaption(activeShot, { font: value })} />
+              </>
+            )}
           </>
         ) : null}
 
@@ -944,6 +1208,29 @@ function TimelineClip({ clip, shot, duration, edit, selected, onSelect, onTrim }
   );
 }
 
+function TimelineCaption({ duration, edit, caption, text, selected, enabled, onSelect }: {
+  duration: number; edit: ClipEdit; caption: CaptionEdit; text: string; selected: boolean; enabled: boolean; onSelect: () => void;
+}) {
+  const width = Math.min(220, Math.max(96, duration * 26));
+  const left = Math.max(0, Math.min(width - 4, (edit.trim_start_seconds + caption.start_seconds) / duration * width));
+  const right = Math.max(left + 4, Math.min(width, (edit.trim_start_seconds + caption.end_seconds) / duration * width));
+  return (
+    <Pressable
+      onPress={onSelect}
+      style={[styles.captionTimelineCell, { width, opacity: enabled && edit.included ? 1 : 0.45 }, selected && styles.captionTimelineCellSelected]}
+      accessibilityRole="button"
+      accessibilityLabel={text ? `Edit caption timing, ${caption.start_seconds.toFixed(1)} to ${caption.end_seconds.toFixed(1)} seconds` : 'Add caption text for this clip'}
+    >
+      <View style={styles.captionTimelineBase} />
+      {!!text && <View style={[styles.captionTimelineSegment, { left, width: Math.max(4, right - left) }]}>
+        <Text numberOfLines={1} style={styles.captionTimelineText}>{text}</Text>
+      </View>}
+      {!text && <Text style={styles.captionNoText}>No caption</Text>}
+      {selected && !!text && <Text style={styles.captionTimelineRange}>{caption.start_seconds.toFixed(1)}–{caption.end_seconds.toFixed(1)}s</Text>}
+    </Pressable>
+  );
+}
+
 function VolumeControl({ value, onChange }: { value: number; onChange: (value: number) => void }) {
   return (
     <View style={styles.volumeRow}>
@@ -1004,8 +1291,9 @@ const styles = StyleSheet.create({
   titleTop: { top: '14%' }, titleCenter: { top: '43%' }, titleBottom: { bottom: '15%' },
   previewTitle: { maxWidth: '94%', color: '#fff', fontWeight: '800', textAlign: 'center', paddingHorizontal: 11, paddingVertical: 6, borderRadius: 7, backgroundColor: 'rgba(0,0,0,0.4)', textShadowColor: 'rgba(0,0,0,0.8)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
   previewTitleDark: { backgroundColor: 'rgba(255,255,255,0.83)', textShadowColor: 'transparent' },
-  captionOverlay: { position: 'absolute', bottom: '7%', left: 18, right: 18, alignItems: 'center' },
-  captionText: { maxWidth: '96%', color: '#fff', backgroundColor: 'rgba(0,0,0,0.72)', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 4, textAlign: 'center', fontSize: 15, fontWeight: '700', textShadowColor: '#000', textShadowRadius: 2 },
+  captionOverlay: { position: 'absolute', alignItems: 'center', padding: 2 }, captionOverlayEditing: { borderWidth: 1, borderStyle: 'dashed', borderColor: 'rgba(255,255,255,0.85)', borderRadius: 6 },
+  captionText: { maxWidth: '100%', color: '#fff', backgroundColor: 'rgba(0,0,0,0.76)', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 4, textAlign: 'center', fontSize: 15, fontWeight: '700', textShadowColor: '#000', textShadowRadius: 2 },
+  captionPositionPill: { position: 'absolute', bottom: 12, alignSelf: 'center', minHeight: 31, borderRadius: 18, paddingHorizontal: 12, backgroundColor: 'rgba(16,16,18,0.88)', flexDirection: 'row', alignItems: 'center', gap: 7 }, captionPositionText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   renderingPill: { position: 'absolute', bottom: 14, alignSelf: 'center', minHeight: 36, maxWidth: '88%', borderRadius: 18, paddingHorizontal: 12, backgroundColor: 'rgba(16,16,18,0.86)', flexDirection: 'row', alignItems: 'center', gap: 8 },
   renderingText: { color: '#fff', fontSize: 11, fontWeight: '600' },
   transport: { minHeight: 58, paddingHorizontal: 17, flexDirection: 'row', alignItems: 'center', gap: 9, borderBottomWidth: 1, borderBottomColor: '#202126' },
@@ -1013,6 +1301,8 @@ const styles = StyleSheet.create({
   timecode: { color: '#F1F1F4', fontSize: 14, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginLeft: 7 },
   timeDivider: { color: '#777982' },
   transportSpacer: { flex: 1 },
+  fullReelButton: { height: 34, borderRadius: 18, paddingHorizontal: 9, backgroundColor: '#292B32', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
+  fullReelButtonText: { color: '#F1F1F4', fontSize: 9, fontWeight: '700' },
   timeline: { paddingTop: 1, position: 'relative' },
   ruler: { height: 31, paddingHorizontal: 21, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: '#202126' },
   rulerDot: { color: '#858790', fontSize: 15 }, rulerTime: { color: '#9EA0A7', fontSize: 11, fontVariant: ['tabular-nums'] },
@@ -1028,6 +1318,17 @@ const styles = StyleSheet.create({
   trimGrip: { width: 3, height: 19, borderRadius: 2, backgroundColor: '#24252A' },
   clipCellBadge: { position: 'absolute', left: 4, top: 4, borderRadius: 8, minWidth: 16, height: 16, paddingHorizontal: 4, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center' },
   clipCellBadgeText: { color: '#fff', fontSize: 9, fontWeight: '800' },
+  captionTrackHeader: { height: 30, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#131418' },
+  captionTrackTitle: { flex: 1, color: '#D5D6DC', fontSize: 9, fontWeight: '800', letterSpacing: 0.7 },
+  captionTrack: { height: 49, backgroundColor: '#202126', justifyContent: 'center' },
+  captionStrip: { alignItems: 'center', paddingHorizontal: 8, gap: 3, height: '100%' },
+  captionTimelineCell: { height: 37, borderRadius: 4, overflow: 'hidden', backgroundColor: '#292B32', justifyContent: 'center' },
+  captionTimelineCellSelected: { borderWidth: 1, borderColor: '#F1F1F4' },
+  captionTimelineBase: { ...StyleSheet.absoluteFillObject, backgroundColor: '#2A2C33' },
+  captionTimelineSegment: { position: 'absolute', top: 6, bottom: 6, minWidth: 6, borderRadius: 3, paddingHorizontal: 4, justifyContent: 'center', overflow: 'hidden', backgroundColor: '#9C2856' },
+  captionTimelineText: { color: '#fff', fontSize: 8, fontWeight: '700' }, captionTimelineRange: { position: 'absolute', bottom: 1, right: 4, color: '#D1D2D8', fontSize: 7, fontVariant: ['tabular-nums'] },
+  captionNoText: { color: '#858790', fontSize: 9, textAlign: 'center' }, captionTrackEmpty: { color: '#9C9EA5', textAlign: 'center', fontSize: 10 },
+  captionTimingRow: { minHeight: 52, paddingHorizontal: 8, borderRadius: 10, backgroundColor: '#24262D', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, captionTimingDivider: { height: 24, width: 1, backgroundColor: '#41434A' },
   addClip: { width: 47, height: 47, borderRadius: 10, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', marginHorizontal: 6 },
   playhead: { position: 'absolute', left: '50%', top: 33, height: 180, width: 2, marginLeft: -1, backgroundColor: '#fff', zIndex: 5 },
   emptyTimeline: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9 },

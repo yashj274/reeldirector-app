@@ -135,6 +135,7 @@ async function readProject(id: string) {
   };
   if (project.export?.storage_path) project.export.url = await signedUrl(project.export.storage_path);
   if (project.soundtrack?.storage_path) project.soundtrack.signed_url = await signedUrl(project.soundtrack.storage_path);
+  if (project.voiceover?.storage_path) project.voiceover.signed_url = await signedUrl(project.voiceover.storage_path);
   for (const clip of project.clips || []) {
     if (clip.video_storage_path) clip.video_url = await signedUrl(clip.video_storage_path);
     if (clip.frame_storage_path) clip.frame_url = await signedUrl(clip.frame_storage_path);
@@ -155,6 +156,43 @@ async function deleteStoredFrames(paths: string[]) {
   if (!paths.length || !hasSupabaseConfig()) return;
   const { error } = await getSupabase().storage.from('project-media').remove(paths);
   if (error) console.warn('Unable to remove stored frame images:', error.message);
+}
+
+async function saveAudioTrack(
+  projectId: string,
+  track: 'soundtrack' | 'voiceover',
+  file: { uri: string; name: string; mimeType?: string; file?: Blob },
+) {
+  const user = await currentUser();
+  const project = await readProject(projectId);
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80) || `${track}.mp3`;
+  const storagePath = `${user.id}/${projectId}/audio/${stamp}-${safeName}`;
+  const { File } = await import('expo-file-system');
+  const bytes = file.file ? await file.file.arrayBuffer() : await new File(file.uri).arrayBuffer();
+  const { error } = await getSupabase().storage.from('project-media').upload(storagePath, bytes, {
+    contentType: file.mimeType || 'audio/mpeg', upsert: false,
+  });
+  if (error) throw error;
+  const oldPath = project[track]?.storage_path;
+  const audioTrack = { storage_path: storagePath, title: file.name, content_type: file.mimeType || 'audio/mpeg' };
+  try {
+    await updateProjectData({ ...project, [track]: audioTrack, updated_at: new Date().toISOString() });
+  } catch (updateError) {
+    await deleteStoredFrames([storagePath]);
+    throw updateError;
+  }
+  if (oldPath) await deleteStoredFrames([oldPath]);
+  return { ...audioTrack, signed_url: (await readProject(projectId))[track]?.signed_url };
+}
+
+async function removeAudioTrack(projectId: string, track: 'soundtrack' | 'voiceover') {
+  const project = await readProject(projectId);
+  const oldPath = project[track]?.storage_path;
+  const updated = { ...project };
+  delete updated[track];
+  await updateProjectData({ ...updated, updated_at: new Date().toISOString() });
+  if (oldPath) await deleteStoredFrames([oldPath]);
 }
 
 export const api = {
@@ -237,6 +275,7 @@ export const api = {
     const paths: string[] = [
       ...(project.clips || []).flatMap((clip: any) => [clip.frame_storage_path, clip.video_storage_path]),
       project.soundtrack?.storage_path,
+      project.voiceover?.storage_path,
       project.export?.storage_path,
     ].filter((path: unknown): path is string => typeof path === 'string' && path.startsWith(projectPrefix));
     const { error } = await getSupabase().from('projects').delete()
@@ -321,36 +360,12 @@ export const api = {
       throw error;
     }
   },
-  saveSoundtrack: async (project_id: string, file: { uri: string; name: string; mimeType?: string; file?: Blob }) => {
-    const user = await currentUser();
-    const project = await readProject(project_id);
-    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80) || 'soundtrack.mp3';
-    const storage_path = `${user.id}/${project_id}/audio/${stamp}-${safeName}`;
-    const { File } = await import('expo-file-system');
-    const bytes = file.file ? await file.file.arrayBuffer() : await new File(file.uri).arrayBuffer();
-    const { error } = await getSupabase().storage.from('project-media').upload(storage_path, bytes, {
-      contentType: file.mimeType || 'audio/mpeg', upsert: false,
-    });
-    if (error) throw error;
-    const oldPath = project.soundtrack?.storage_path;
-    const soundtrack = { storage_path, title: file.name, content_type: file.mimeType || 'audio/mpeg' };
-    try {
-      await updateProjectData({ ...project, soundtrack, updated_at: new Date().toISOString() });
-    } catch (updateError) {
-      await deleteStoredFrames([storage_path]);
-      throw updateError;
-    }
-    if (oldPath) await deleteStoredFrames([oldPath]);
-    return { ...soundtrack, signed_url: (await readProject(project_id)).soundtrack?.signed_url };
-  },
-  removeSoundtrack: async (project_id: string) => {
-    const project = await readProject(project_id);
-    const oldPath = project.soundtrack?.storage_path;
-    const { soundtrack: _soundtrack, ...rest } = project;
-    await updateProjectData({ ...rest, updated_at: new Date().toISOString() });
-    if (oldPath) await deleteStoredFrames([oldPath]);
-  },
+  saveSoundtrack: async (project_id: string, file: { uri: string; name: string; mimeType?: string; file?: Blob }) =>
+    saveAudioTrack(project_id, 'soundtrack', file),
+  removeSoundtrack: async (project_id: string) => removeAudioTrack(project_id, 'soundtrack'),
+  saveVoiceover: async (project_id: string, file: { uri: string; name: string; mimeType?: string; file?: Blob }) =>
+    saveAudioTrack(project_id, 'voiceover', file),
+  removeVoiceover: async (project_id: string) => removeAudioTrack(project_id, 'voiceover'),
   updateStoryboard: async (id: string, shots: any[]) => {
     const project = await readProject(id);
     for (let i = 0; i < shots.length; i++) {
@@ -380,8 +395,9 @@ export const api = {
     opts: {
       aspect_ratio?: string; fit_mode?: string; resolution?: string; fps?: number; editing_style?: string;
       clip_order?: number[]; clip_edits?: Record<string, any>[];
+      caption_edits?: Record<string, any>[];
       title_text?: string; title_font?: string; title_position?: string;
-      title_color?: string; title_size?: string; music_volume?: number; original_volume?: number;
+      title_color?: string; title_size?: string; music_volume?: number; voiceover_volume?: number; original_volume?: number;
       captions_enabled?: boolean;
     } = {},
     onProgress?: (status: string) => void,
@@ -393,6 +409,9 @@ export const api = {
     };
     if (typeof exportOptions.music_volume === 'number' && exportOptions.music_volume > 1) {
       exportOptions.music_volume /= 100;
+    }
+    if (typeof exportOptions.voiceover_volume === 'number' && exportOptions.voiceover_volume > 1) {
+      exportOptions.voiceover_volume /= 100;
     }
     if (typeof exportOptions.original_volume === 'number' && exportOptions.original_volume > 1) {
       exportOptions.original_volume /= 100;

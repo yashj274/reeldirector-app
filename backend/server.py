@@ -110,6 +110,15 @@ class ClipEditIn(BaseModel):
     filter_preset: str = "original"
     brightness: float = 0.0
 
+class CaptionEditIn(BaseModel):
+    shot_index: int
+    start_seconds: float = 0.0
+    end_seconds: Optional[float] = None
+    position_x: float = 50.0
+    position_y: float = 84.0
+    size: str = "medium"
+    font: str = "sans"
+
 class ExportIn(BaseModel):
     project_id: Optional[str] = None  # taken from URL path; body-optional
     aspect_ratio: str = "9:16"  # 9:16, 1:1, 16:9
@@ -121,6 +130,7 @@ class ExportIn(BaseModel):
     fit_mode: str = "fill"
     clip_order: List[int] = []
     clip_edits: List[ClipEditIn] = []
+    caption_edits: List[CaptionEditIn] = []
     title_text: str = ""
     title_font: str = "sans"
     title_position: str = "bottom"
@@ -128,6 +138,7 @@ class ExportIn(BaseModel):
     title_size: str = "medium"
     music_volume: float = 0.25
     original_volume: float = 0.8
+    voiceover_volume: float = 1.0
     captions_enabled: bool = False
 
 
@@ -233,6 +244,18 @@ def _title_font_path(font_name: str) -> Path:
             Path("/System/Library/Fonts/Supplemental/Georgia.ttf"),
         ],
         "mono": [ROOT_DIR / "assets/fonts/SpaceMono-Regular.ttf"],
+        "bold": [
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+        ],
+        "condensed": [
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        ],
+        "serif_bold": [
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"),
+            Path("/System/Library/Fonts/Supplemental/Georgia Bold.ttf"),
+        ],
     }
     candidates = font_candidates.get(font_name, font_candidates["sans"])
     return next((path for path in candidates if path.is_file()),
@@ -252,7 +275,8 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
                       title_text: str = "", title_font: str = "sans",
                       title_position: str = "bottom", title_color: str = "white",
                       title_size: str = "medium", music_volume: float = 0.25,
-                      original_volume: float = 0.8) -> None:
+                      original_volume: float = 0.8, voiceover_file: Optional[Path] = None,
+                      voiceover_volume: float = 1.0) -> None:
     ffmpeg = _ffmpeg_executable()
     grades = {
         "cinematic": "eq=contrast=1.08:saturation=0.95:brightness=-0.02",
@@ -302,36 +326,37 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
         )
     video_filter = ",".join(filters)
     command = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file)]
-    has_original_audio = False
-    if soundtrack_file:
-        first_entry = next((line for line in concat_file.read_text().splitlines() if line.startswith("file ")), "")
-        first_name = first_entry[5:].strip().strip("'").strip('"')
-        first_clip = Path(first_name)
-        if not first_clip.is_absolute():
-            first_clip = concat_file.parent / first_clip
-        probe = subprocess.run(
-            [ffmpeg, "-i", str(first_clip)],
-            check=False, capture_output=True, text=True, timeout=30,
-        )
-        has_original_audio = "Audio:" in probe.stderr
+    external_audio_labels = []
+    audio_filters = []
+    source_audio_filter = f"{'atempo=1.25,' if editing_style == 'fast_pace' else ''}volume={max(0.0, min(1.0, original_volume))}"
+    audio_filters.append(f"[0:a]{source_audio_filter}[original]")
+    external_audio_labels.append("[original]")
+    next_input = 1
+    mix_music = soundtrack_file is not None and music_volume > 0
+    mix_voiceover = voiceover_file is not None and voiceover_volume > 0
+    if mix_music:
         command.extend(["-stream_loop", "-1", "-i", str(soundtrack_file)])
+        audio_filters.append(f"[{next_input}:a]volume={max(0.0, min(1.0, music_volume))}[music]")
+        external_audio_labels.append("[music]")
+        next_input += 1
+    if mix_voiceover:
+        command.extend(["-i", str(voiceover_file)])
+        voiceover_tempo = "atempo=1.25," if editing_style == "fast_pace" else ""
+        audio_filters.append(f"[{next_input}:a]{voiceover_tempo}volume={max(0.0, min(1.0, voiceover_volume))}[voiceover]")
+        external_audio_labels.append("[voiceover]")
     command.extend(["-vf", video_filter, "-map", "0:v:0"])
-    if soundtrack_file and has_original_audio:
+    if mix_music or mix_voiceover:
+        audio_filters.append(
+            f"{''.join(external_audio_labels)}amix=inputs={len(external_audio_labels)}:"
+            "duration=first:dropout_transition=2[aout]"
+        )
         command.extend([
-            "-filter_complex",
-            f"[0:a]{'atempo=1.25,' if editing_style == 'fast_pace' else ''}volume={max(0.0, min(1.0, original_volume))}[original];"
-            f"[1:a]volume={max(0.0, min(1.0, music_volume))}[music];"
-            "[original][music]amix=inputs=2:duration=first:dropout_transition=2[aout]",
-            "-map", "[aout]",
+            "-filter_complex", ";".join(audio_filters), "-map", "[aout]",
         ])
-    elif soundtrack_file:
-        command.extend(["-map", "1:a:0", "-filter:a", f"volume={max(0.0, min(1.0, music_volume))}"])
     else:
         command.extend(["-map", "0:a?"])
-        if editing_style == "fast_pace":
-            command.extend(["-filter:a", f"atempo=1.25,volume={max(0.0, min(1.0, original_volume))}"])
-        else:
-            command.extend(["-filter:a", f"volume={max(0.0, min(1.0, original_volume))}"])
+        if editing_style == "fast_pace" or original_volume != 1.0:
+            command.extend(["-filter:a", source_audio_filter])
     command.extend([
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", str(output_file),
@@ -345,7 +370,10 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
 def _normalize_video_clip(input_file: Path, output_file: Path, width: int, height: int, fps: int,
                           trim_start_seconds: float = 0, trim_end_seconds: Optional[float] = None,
                           filter_preset: str = "original", fit_mode: str = "fill",
-                          brightness: float = 0.0, captions_file: Optional[Path] = None) -> None:
+                          brightness: float = 0.0, captions_file: Optional[Path] = None,
+                          caption_start_seconds: float = 0.0, caption_end_seconds: Optional[float] = None,
+                          caption_position_x: float = 50.0, caption_position_y: float = 84.0,
+                          caption_size: str = "medium", caption_font: str = "sans") -> None:
     """Transcode mixed phone/AI sources into matching MP4 video and AAC audio streams."""
     ffmpeg = _ffmpeg_executable()
     probe = subprocess.run(
@@ -383,14 +411,19 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
     if abs(exposure) >= 0.01:
         video_filter = video_filter.replace(",format=yuv420p", f",eq=brightness={exposure:.3f},format=yuv420p")
     if captions_file and captions_file.is_file() and captions_file.read_text(encoding="utf-8").strip():
-        font_file = _escape_filter_path(_title_font_path("sans"))
+        font_file = _escape_filter_path(_title_font_path(caption_font))
         text_file = _escape_filter_path(captions_file)
-        font_size = max(22, min(58, round(min(width, height) * 0.045)))
+        size_ratio = {"small": 0.034, "medium": 0.046, "large": 0.062}.get(caption_size, 0.046)
+        font_size = max(18, min(80, round(min(width, height) * size_ratio)))
+        x_ratio = max(0.0, min(100.0, caption_position_x)) / 100
+        y_ratio = max(0.0, min(100.0, caption_position_y)) / 100
+        caption_duration = max(0.0, caption_end_seconds) if caption_end_seconds is not None else max(0.0, (trim_end_seconds or 0) - trim_start_seconds)
         caption_filter = (
             f"drawtext=fontfile='{font_file}':textfile='{text_file}':"
             f"fontsize={font_size}:fontcolor=white:borderw=2:bordercolor=black@0.85:"
             "expansion=none:box=1:boxcolor=black@0.62:boxborderw=10:"
-            "x=(w-text_w)/2:y=h-text_h-h*0.10"
+            f"x=(w-text_w)*{x_ratio:.4f}:y=(h-text_h)*{y_ratio:.4f}:"
+            f"enable='between(t,{max(0.0, caption_start_seconds):.3f},{caption_duration:.3f})'"
         )
         video_filter = video_filter.replace(",format=yuv420p", f",{caption_filter},format=yuv420p")
     command.extend([
@@ -1508,6 +1541,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
         raise HTTPException(404, "Project not found")
 
     clip_edits = {edit.shot_index: edit for edit in body.clip_edits}
+    caption_edits = {edit.shot_index: edit for edit in body.caption_edits}
     clips = sorted(doc.get("clips", []), key=lambda clip: clip.get("shot_index", 0))
     clips = [clip for clip in clips if clip.get("video_storage_path")
              and clip_edits.get(int(clip.get("shot_index", -1)), ClipEditIn(
@@ -1563,6 +1597,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
 
     supported_clip_filters = {"original", "warm", "cool", "mono", "vivid", "vintage", "soft"}
     normalized_edits: Dict[int, Dict[str, Any]] = {}
+    normalized_captions: Dict[int, Dict[str, Any]] = {}
     for clip in clips:
         shot_index = int(clip.get("shot_index", -1))
         edit = clip_edits.get(shot_index, ClipEditIn(shot_index=shot_index))
@@ -1586,15 +1621,43 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
             "brightness": max(-0.5, min(0.5, float(edit.brightness))),
         }
 
-    if body.title_font not in {"sans", "serif", "mono"}:
-        raise HTTPException(400, "Choose Sans, Serif, or Space Mono for title text.")
+        caption = caption_edits.get(shot_index)
+        trimmed_duration = max(0.15, (trim_end if trim_end is not None else duration_seconds) - trim_start)
+        caption_start = float(caption.start_seconds) if caption else 0.0
+        caption_end = float(caption.end_seconds) if caption and caption.end_seconds is not None else trimmed_duration
+        position_x = float(caption.position_x) if caption else 50.0
+        position_y = float(caption.position_y) if caption else 84.0
+        caption_size = caption.size if caption else "medium"
+        caption_font = caption.font if caption else "sans"
+        if any(not math.isfinite(value) for value in (caption_start, caption_end, position_x, position_y)):
+            raise HTTPException(400, f"Shot {shot_index + 1} has invalid caption settings.")
+        if caption_start < 0 or caption_end <= caption_start or caption_end > trimmed_duration + 0.05:
+            raise HTTPException(400, f"Shot {shot_index + 1} caption timing must fit inside its trimmed clip.")
+        if not 0 <= position_x <= 100 or not 0 <= position_y <= 100:
+            raise HTTPException(400, f"Shot {shot_index + 1} caption position is outside the video frame.")
+        if caption_size not in {"small", "medium", "large"}:
+            raise HTTPException(400, "Choose a supported caption size.")
+        if caption_font not in {"sans", "serif", "mono", "bold", "condensed", "serif_bold"}:
+            raise HTTPException(400, "Choose a supported caption font.")
+        normalized_captions[shot_index] = {
+            "start_seconds": caption_start,
+            "end_seconds": min(trimmed_duration, caption_end),
+            "position_x": position_x,
+            "position_y": position_y,
+            "size": caption_size,
+            "font": caption_font,
+        }
+
+    if body.title_font not in {"sans", "serif", "mono", "bold", "condensed", "serif_bold"}:
+        raise HTTPException(400, "Choose a supported title font.")
     if body.title_position not in {"top", "center", "bottom"}:
         raise HTTPException(400, "Choose a valid title position.")
     if body.title_color not in {"white", "gold", "pink", "black"}:
         raise HTTPException(400, "Choose a supported title color.")
     if body.title_size not in {"small", "medium", "large"}:
         raise HTTPException(400, "Choose a supported title size.")
-    if not 0 <= body.music_volume <= 1 or not 0 <= body.original_volume <= 1:
+    if (not 0 <= body.music_volume <= 1 or not 0 <= body.original_volume <= 1
+            or not 0 <= body.voiceover_volume <= 1):
         raise HTTPException(400, "Audio levels must be between 0 and 100 percent.")
     title_text = re.sub(r"\s+", " ", body.title_text or "").strip()[:80]
 
@@ -1630,8 +1693,14 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
     soundtrack_path = soundtrack.get("storage_path")
     if soundtrack_path and not soundtrack_path.startswith(expected_prefix):
         raise HTTPException(400, "The soundtrack is not stored in this project.")
+    voiceover = doc.get("voiceover") or {}
+    voiceover_path = voiceover.get("storage_path")
+    if voiceover_path and not voiceover_path.startswith(expected_prefix):
+        raise HTTPException(400, "The voiceover is not stored in this project.")
 
     if body.render_provider == "creatomate":
+        if voiceover_path:
+            raise HTTPException(400, "Voiceover mixing is currently available with the built-in renderer.")
         return await start_creatomate_render(
             pid, doc, clips, body, user["id"], expected_prefix, width, height,
             requested_style, soundtrack_path, soundtrack,
@@ -1654,6 +1723,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
                 clip_edit = normalized_edits.get(int(clip.get("shot_index", -1)), {})
                 shot = storyboard_by_shot.get(int(clip.get("shot_index", -1)), {})
                 caption_text = re.sub(r"\s+", " ", str(shot.get("on_screen_text") or "")).strip()[:180]
+                caption_edit = normalized_captions.get(int(clip.get("shot_index", -1)), {})
                 caption_file = None
                 if body.captions_enabled and caption_text:
                     caption_file = temp / f"caption-{index}.txt"
@@ -1663,6 +1733,9 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
                     clip_edit.get("trim_start_seconds", 0), clip_edit.get("trim_end_seconds"),
                     clip_edit.get("filter_preset", "original"), body.fit_mode,
                     clip_edit.get("brightness", clip.get("brightness", 0)), caption_file,
+                    caption_edit.get("start_seconds", 0), caption_edit.get("end_seconds"),
+                    caption_edit.get("position_x", 50), caption_edit.get("position_y", 84),
+                    caption_edit.get("size", "medium"), caption_edit.get("font", "sans"),
                 )
                 if not local_clip.stat().st_size:
                     raise RuntimeError("A saved video clip could not be normalized")
@@ -1677,12 +1750,18 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
                 local_soundtrack.write_bytes(await download_media(soundtrack_path))
                 if not local_soundtrack.stat().st_size:
                     raise RuntimeError("The saved soundtrack is empty")
+            local_voiceover = None
+            if voiceover_path:
+                local_voiceover = temp / "voiceover"
+                local_voiceover.write_bytes(await download_media(voiceover_path))
+                if not local_voiceover.stat().st_size:
+                    raise RuntimeError("The saved voiceover is empty")
 
             await asyncio.to_thread(
                 _run_video_render, concat_file, output_file, width, height,
                 local_soundtrack, body.fps, requested_style, title_text, body.title_font,
                 body.title_position, body.title_color, body.title_size,
-                body.music_volume, body.original_volume,
+                body.music_volume, body.original_volume, local_voiceover, body.voiceover_volume,
             )
             rendered = output_file.read_bytes()
     except HTTPException:
@@ -1737,6 +1816,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
         "music_volume": body.music_volume,
         "original_volume": body.original_volume,
         "music": {"id": "uploaded-soundtrack", "title": soundtrack.get("title")} if soundtrack_path else None,
+        "voiceover": {"title": voiceover.get("title")} if voiceover_path else None,
         "captions": captions_applied,
         "render_seconds": round(time.monotonic() - started, 1),
         "exported_at": datetime.now(timezone.utc).isoformat(),
