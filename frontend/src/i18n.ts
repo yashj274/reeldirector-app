@@ -38,7 +38,7 @@ const STRINGS: Record<string, Record<string, string>> = {
     new_password: 'New password', update_password: 'Update password', give_reel_name: 'Give it a name',
     type_of_shoot: 'Type of shoot', mood: 'Mood', duration: 'Duration', platform: 'Platform',
     purpose_label: 'What is it for?', purpose_hint: 'Describe what the video should show and why you are making it.',
-    purpose_placeholder: "Example: Prachi's mehndi ceremony — show henna details, family moments, and the joyful rituals.",
+    purpose_placeholder: 'Describe your project and we’ll shape the perfect reel for it…',
     purpose_required: 'Add a little more detail so the AI can plan your story (at least 10 characters).',
     target_audience: 'Target audience (optional)', create_project: 'Create project',
     custom_script: 'Your custom script', scene_scan_label: 'AI environment scan', storyboard: 'Storyboard',
