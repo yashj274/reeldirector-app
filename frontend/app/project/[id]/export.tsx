@@ -211,7 +211,8 @@ export default function Export() {
   const currentActiveUri = useRef<string | null>(null);
   const currentTrimStart = useRef(0);
   const currentClipEnd = useRef(0);
-  const advanceRef = useRef<() => boolean>(() => false);
+  const advanceRef = useRef<(sourcePlayer?: any) => boolean>(() => false);
+  const currentPlayer = useRef<any>(null);
   const timelineWidthRef = useRef(0);
   const timelineDurationRef = useRef(0);
   const timelinePositionRef = useRef(0);
@@ -348,6 +349,7 @@ export default function Export() {
     videoPlayer.muted = true;
     videoPlayer.timeUpdateEventInterval = 0.12;
   });
+  currentPlayer.current = player;
 
   const preparePlayer = useCallback((targetPlayer: any) => {
     const shot = currentActiveShot.current;
@@ -365,7 +367,8 @@ export default function Export() {
     }
   }, []);
 
-  const advanceToNextClip = useCallback(() => {
+  const advanceToNextClip = useCallback((sourcePlayer?: any) => {
+    if (sourcePlayer && sourcePlayer !== currentPlayer.current) return true;
     if (autoAdvance.current) return true;
     if (nextIncludedClip && nextIncludedShot !== null) {
       const start = editForShot(settings, nextIncludedShot).trim_start_seconds;
@@ -404,7 +407,7 @@ export default function Export() {
     const timeSub = player.addListener('timeUpdate', ({ currentTime: time }) => {
       const clipEnd = currentClipEnd.current;
       if (time >= clipEnd - 0.04) {
-        if (!advanceRef.current()) {
+        if (!advanceRef.current(player)) {
           player.currentTime = clipEnd;
           setCurrentTime(clipEnd);
         }
@@ -420,10 +423,13 @@ export default function Export() {
       if (status === 'readyToPlay') preparePlayer(player);
     });
     const playingSub = player.addListener('playingChange', ({ isPlaying }) => setPlaying(isPlaying));
+    const endSub = player.addListener('playToEnd', () => {
+      if (player.currentTime >= currentClipEnd.current - 0.08) advanceRef.current(player);
+    });
     // A short clip can finish before React attaches listeners to its new player.
     // Check readiness after subscribing so the next segment still starts.
     preparePlayer(player);
-    return () => { timeSub.remove(); sourceSub.remove(); statusSub.remove(); playingSub.remove(); };
+    return () => { timeSub.remove(); sourceSub.remove(); statusSub.remove(); playingSub.remove(); endSub.remove(); };
   }, [player, preparePlayer]);
 
   const pushHistory = (current: EditorSettings) => {
