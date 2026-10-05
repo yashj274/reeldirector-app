@@ -151,6 +151,7 @@ export default function Export() {
   const historyBack = useRef<EditorSettings[]>([]);
   const historyForward = useRef<EditorSettings[]>([]);
   const desiredTime = useRef(0);
+  const autoAdvance = useRef(false);
   const initialLoadComplete = useRef(false);
   const dirtyRef = useRef(dirty);
   const selectedShotRef = useRef(selectedShot);
@@ -232,9 +233,19 @@ export default function Export() {
   const activeVideoUri = activeClip?.video_url || null;
   const activeTrimStart = activeEdit?.trim_start_seconds || 0;
   const activeSourceDuration = Number(activeClip?.duration_seconds) || 0;
-  const selectedDuration = activeEdit ? Math.max(0.1, activeEdit.trim_end_seconds - activeEdit.trim_start_seconds) : playerDuration;
   const captionText = activeStoryboard?.on_screen_text || '';
   const activeFilter = activeEdit?.filter_preset || 'original';
+  const activeIndex = activeClip ? orderedClips.indexOf(activeClip) : -1;
+  const nextIncludedClip = orderedClips.slice(activeIndex + 1).find((clip: any, index: number) => editForShot(settings, shotIndex(clip, activeIndex + 1 + index)).included);
+  const nextIncludedShot = nextIncludedClip ? shotIndex(nextIncludedClip, orderedClips.indexOf(nextIncludedClip)) : null;
+  const fullTimelineDuration = orderedClips.reduce((total: number, clip: any, index: number) => {
+    const edit = editForShot(settings, shotIndex(clip, index));
+    return edit.included ? total + Math.max(0, edit.trim_end_seconds - edit.trim_start_seconds) : total;
+  }, 0);
+  const timelinePosition = orderedClips.slice(0, Math.max(0, activeIndex)).reduce((total: number, clip: any, index: number) => {
+    const edit = editForShot(settings, shotIndex(clip, index));
+    return edit.included ? total + Math.max(0, edit.trim_end_seconds - edit.trim_start_seconds) : total;
+  }, 0) + Math.max(0, currentTime - (activeEdit?.trim_start_seconds || 0));
   const webPreviewFilter = [FILTERS[activeFilter], FILTERS[settings.editing_style], activeEdit ? `brightness(${1 + activeEdit.brightness})` : null].filter(Boolean).join(' ');
   const spin = rot.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
 
@@ -243,6 +254,21 @@ export default function Export() {
     videoPlayer.muted = true;
     videoPlayer.timeUpdateEventInterval = 0.12;
   });
+
+  const advanceToNextClip = useCallback(() => {
+    if (nextIncludedClip && nextIncludedShot !== null) {
+      const start = editForShot(settings, nextIncludedShot).trim_start_seconds;
+      autoAdvance.current = true;
+      desiredTime.current = start;
+      setSelectedShot(nextIncludedShot);
+      setCurrentTime(start);
+      player.pause();
+      return true;
+    }
+    player.pause();
+    setPlaying(false);
+    return false;
+  }, [nextIncludedClip, nextIncludedShot, player, settings]);
 
   useEffect(() => {
     if (!activeVideoUri) {
@@ -262,10 +288,10 @@ export default function Export() {
   useEffect(() => {
     const timeSub = player.addListener('timeUpdate', ({ currentTime: time }) => {
       if (time >= activeClipEnd - 0.04) {
-        player.pause();
-        player.currentTime = activeClipEnd;
-        setCurrentTime(activeClipEnd);
-        setPlaying(false);
+        if (!advanceToNextClip()) {
+          player.currentTime = activeClipEnd;
+          setCurrentTime(activeClipEnd);
+        }
       } else {
         setCurrentTime(time);
       }
@@ -274,11 +300,16 @@ export default function Export() {
       setPlayerDuration(duration || 0);
       const start = Math.min(desiredTime.current, Math.max(0, duration - 0.05));
       if (Number.isFinite(start)) player.currentTime = start;
+      if (autoAdvance.current) {
+        autoAdvance.current = false;
+        player.play();
+        setPlaying(true);
+      }
     });
     const playingSub = player.addListener('playingChange', ({ isPlaying }) => setPlaying(isPlaying));
-    const endSub = player.addListener('playToEnd', () => setPlaying(false));
+    const endSub = player.addListener('playToEnd', () => { advanceToNextClip(); });
     return () => { timeSub.remove(); sourceSub.remove(); playingSub.remove(); endSub.remove(); };
-  }, [player, activeClipEnd]);
+  }, [player, activeClipEnd, advanceToNextClip]);
 
   const pushHistory = (current: EditorSettings) => {
     historyBack.current = [...historyBack.current.slice(-39), current];
@@ -327,6 +358,7 @@ export default function Export() {
   };
 
   const selectClip = (shot: number) => {
+    autoAdvance.current = false;
     setSelectedShot(shot);
     const edit = editForShot(settings, shot);
     desiredTime.current = edit.trim_start_seconds;
@@ -339,9 +371,11 @@ export default function Export() {
   const togglePlayback = () => {
     if (!activeClip?.video_url) return;
     if (player.playing) {
+      autoAdvance.current = false;
       player.pause();
       setPlaying(false);
     } else {
+      autoAdvance.current = false;
       if (currentTime >= activeClipEnd - 0.05) {
         player.currentTime = activeEdit?.trim_start_seconds || 0;
         setCurrentTime(activeEdit?.trim_start_seconds || 0);
@@ -619,7 +653,7 @@ export default function Export() {
           <Pressable style={styles.roundControl} onPress={togglePlayback} accessibilityLabel={playing ? 'Pause preview' : 'Play preview'}>
             <Ionicons name={playing ? 'pause' : 'play'} size={21} color="#fff" />
           </Pressable>
-          <Text style={styles.timecode}>{clock(currentTime - (activeEdit?.trim_start_seconds || 0))}<Text style={styles.timeDivider}> / </Text>{clock(selectedDuration)}</Text>
+          <Text style={styles.timecode}>{clock(timelinePosition)}<Text style={styles.timeDivider}> / </Text>{clock(fullTimelineDuration)}</Text>
           <View style={styles.transportSpacer} />
           <Pressable style={styles.roundControl} onPress={undo} disabled={!historyBack.current.length} accessibilityLabel="Undo edit">
             <Ionicons name="arrow-undo" size={19} color={historyBack.current.length ? '#fff' : '#686A72'} />
