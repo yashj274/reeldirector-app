@@ -128,6 +128,7 @@ class ExportIn(BaseModel):
     title_size: str = "medium"
     music_volume: float = 0.25
     original_volume: float = 0.8
+    captions_enabled: bool = False
 
 
 class AiVideoIn(BaseModel):
@@ -344,7 +345,7 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
 def _normalize_video_clip(input_file: Path, output_file: Path, width: int, height: int, fps: int,
                           trim_start_seconds: float = 0, trim_end_seconds: Optional[float] = None,
                           filter_preset: str = "original", fit_mode: str = "fill",
-                          brightness: float = 0.0) -> None:
+                          brightness: float = 0.0, captions_file: Optional[Path] = None) -> None:
     """Transcode mixed phone/AI sources into matching MP4 video and AAC audio streams."""
     ffmpeg = _ffmpeg_executable()
     probe = subprocess.run(
@@ -381,6 +382,17 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
     exposure = max(-0.5, min(0.5, float(brightness or 0)))
     if abs(exposure) >= 0.01:
         video_filter = video_filter.replace(",format=yuv420p", f",eq=brightness={exposure:.3f},format=yuv420p")
+    if captions_file and captions_file.is_file() and captions_file.read_text(encoding="utf-8").strip():
+        font_file = _escape_filter_path(_title_font_path("sans"))
+        text_file = _escape_filter_path(captions_file)
+        font_size = max(22, min(58, round(min(width, height) * 0.045)))
+        caption_filter = (
+            f"drawtext=fontfile='{font_file}':textfile='{text_file}':"
+            f"fontsize={font_size}:fontcolor=white:borderw=2:bordercolor=black@0.85:"
+            "expansion=none:box=1:boxcolor=black@0.62:boxborderw=10:"
+            "x=(w-text_w)/2:y=h-text_h-h*0.10"
+        )
+        video_filter = video_filter.replace(",format=yuv420p", f",{caption_filter},format=yuv420p")
     command.extend([
         "-map", "0:v:0", "-map", audio_map, "-vf", video_filter,
         "-af", "apad", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
@@ -1515,6 +1527,13 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
         clips = ordered_clips + remaining
 
     expected_prefix = f"{user['id']}/{pid}/"
+    storyboard_by_shot = {
+        index: shot for index, shot in enumerate(doc.get("storyboard") or []) if isinstance(shot, dict)
+    }
+    captions_applied = body.captions_enabled and any(
+        str(storyboard_by_shot.get(int(clip.get("shot_index", -1)), {}).get("on_screen_text") or "").strip()
+        for clip in clips
+    )
     for clip in clips:
         if not clip["video_storage_path"].startswith(expected_prefix):
             raise HTTPException(400, "A clip is not stored in this project.")
@@ -1633,11 +1652,17 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
                     raise RuntimeError("A saved video clip is empty")
                 local_clip = temp / f"clip-{index}.mp4"
                 clip_edit = normalized_edits.get(int(clip.get("shot_index", -1)), {})
+                shot = storyboard_by_shot.get(int(clip.get("shot_index", -1)), {})
+                caption_text = re.sub(r"\s+", " ", str(shot.get("on_screen_text") or "")).strip()[:180]
+                caption_file = None
+                if body.captions_enabled and caption_text:
+                    caption_file = temp / f"caption-{index}.txt"
+                    caption_file.write_text(caption_text, encoding="utf-8")
                 await asyncio.to_thread(
                     _normalize_video_clip, source_clip, local_clip, width, height, body.fps,
                     clip_edit.get("trim_start_seconds", 0), clip_edit.get("trim_end_seconds"),
                     clip_edit.get("filter_preset", "original"), body.fit_mode,
-                    clip_edit.get("brightness", clip.get("brightness", 0)),
+                    clip_edit.get("brightness", clip.get("brightness", 0)), caption_file,
                 )
                 if not local_clip.stat().st_size:
                     raise RuntimeError("A saved video clip could not be normalized")
@@ -1712,7 +1737,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
         "music_volume": body.music_volume,
         "original_volume": body.original_volume,
         "music": {"id": "uploaded-soundtrack", "title": soundtrack.get("title")} if soundtrack_path else None,
-        "captions": False,
+        "captions": captions_applied,
         "render_seconds": round(time.monotonic() - started, 1),
         "exported_at": datetime.now(timezone.utc).isoformat(),
     }

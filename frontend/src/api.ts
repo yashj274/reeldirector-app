@@ -382,6 +382,7 @@ export const api = {
       clip_order?: number[]; clip_edits?: Record<string, any>[];
       title_text?: string; title_font?: string; title_position?: string;
       title_color?: string; title_size?: string; music_volume?: number; original_volume?: number;
+      captions_enabled?: boolean;
     } = {},
     onProgress?: (status: string) => void,
   ) => {
