@@ -26,7 +26,7 @@ export default function Dashboard() {
 
   const load = useCallback(async () => {
     try {
-      const [t, p, u] = await Promise.all([api.templates(), api.listProjects(), getUser()]);
+      const [t, p, u] = await Promise.all([api.templates(), api.listProjects(5), getUser()]);
       setTemplates(t); setProjects(p); setUser(u);
       setLoadError('');
     } catch (e: any) {
@@ -36,7 +36,7 @@ export default function Dashboard() {
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   const onNewProject = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});

@@ -29,6 +29,10 @@ function getBackendBase() {
 const BASE = getBackendBase();
 const TOKEN_KEY = 'reeldirector.token';
 const USER_KEY = 'reeldirector.user';
+const SIGNED_URL_CACHE_TTL_MS = 50 * 60 * 1000;
+const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+let backendWarmupAttemptedAt = 0;
+let backendWarmupRequest: Promise<void> | null = null;
 
 export function friendlyAuthError(error: unknown, action: 'sign in' | 'create account') {
   const message = error instanceof Error ? error.message : '';
@@ -67,13 +71,66 @@ function profile(user: any) {
 
 async function currentUser() {
   const client = getSupabase();
-  const { data: { user }, error } = await client.auth.getUser();
+  // This runs in the client. Project and storage access are still enforced by
+  // Supabase RLS; reading the refreshed local session avoids an Auth network
+  // round trip every time a project is loaded or saved.
+  const { data: { session }, error } = await client.auth.getSession();
   if (/auth session missing|session not found/i.test(error?.message || '')) {
     throw new Error('Please sign in on this device before creating or editing projects.');
   }
   if (error) throw error;
-  if (!user) throw new Error('Please sign in on this device before creating or editing projects.');
-  return user;
+  if (!session?.user) throw new Error('Please sign in on this device before creating or editing projects.');
+  return session.user;
+}
+
+async function signMediaPaths(paths: string[]) {
+  const now = Date.now();
+  const urls = new Map<string, string>();
+  const missing: string[] = [];
+  for (const path of [...new Set(paths)]) {
+    const cached = signedUrlCache.get(path);
+    if (cached && cached.expiresAt > now) urls.set(path, cached.url);
+    else {
+      signedUrlCache.delete(path);
+      missing.push(path);
+    }
+  }
+  if (!missing.length) return urls;
+
+  const { data, error } = await getSupabase().storage.from('project-media')
+    .createSignedUrls(missing, 3600);
+  if (error) throw error;
+  for (const item of data || []) {
+    if (!item.path || !item.signedUrl) continue;
+    urls.set(item.path, item.signedUrl);
+    signedUrlCache.set(item.path, { url: item.signedUrl, expiresAt: now + SIGNED_URL_CACHE_TTL_MS });
+  }
+  // Keep the in-memory cache bounded on long-running sessions.
+  while (signedUrlCache.size > 500) {
+    const oldestPath = signedUrlCache.keys().next().value;
+    if (!oldestPath) break;
+    signedUrlCache.delete(oldestPath);
+  }
+  return urls;
+}
+
+async function warmBackend() {
+  if (!BASE) return;
+  if (backendWarmupRequest) return backendWarmupRequest;
+  if (Date.now() - backendWarmupAttemptedAt < 5 * 60 * 1000) return;
+  backendWarmupAttemptedAt = Date.now();
+  const controller = new AbortController();
+  // Render free services can take about a minute to wake; this wait stays in
+  // the background and lets the health request finish when the service is up.
+  const timeout = setTimeout(() => controller.abort(), 90000);
+  backendWarmupRequest = fetch(`${BASE}/`, { signal: controller.signal })
+    .then(() => undefined)
+    .catch(() => undefined)
+    .finally(() => {
+      clearTimeout(timeout);
+      backendWarmupRequest = null;
+    });
+  return backendWarmupRequest;
 }
 
 export async function getToken(): Promise<string | null> {
@@ -136,11 +193,7 @@ async function readProject(id: string) {
     if (clip.frame_storage_path) assets.push({ path: clip.frame_storage_path, apply: (url) => { clip.frame_url = url; } });
   }
   if (assets.length) {
-    const paths = [...new Set(assets.map((asset) => asset.path))];
-    const { data: signed, error: signError } = await getSupabase().storage.from('project-media')
-      .createSignedUrls(paths, 3600);
-    if (signError) throw signError;
-    const urlByPath = new Map((signed || []).map((entry) => [entry.path, entry.signedUrl]));
+    const urlByPath = await signMediaPaths(assets.map((asset) => asset.path));
     for (const asset of assets) asset.apply(urlByPath.get(asset.path) || null);
   }
   return project;
@@ -157,6 +210,7 @@ async function updateProjectData(project: any) {
 
 async function deleteStoredFrames(paths: string[]) {
   if (!paths.length || !hasSupabaseConfig()) return;
+  paths.forEach((path) => signedUrlCache.delete(path));
   const { error } = await getSupabase().storage.from('project-media').remove(paths);
   if (error) console.warn('Unable to remove stored frame images:', error.message);
 }
@@ -199,6 +253,7 @@ async function removeAudioTrack(projectId: string, track: 'soundtrack' | 'voiceo
 }
 
 export const api = {
+  warmBackend,
   signup: async (email: string, password: string, name: string) => {
     const emailRedirectTo = Platform.OS === 'web' && typeof window !== 'undefined'
       ? `${window.location.origin}/auth/callback`
@@ -254,10 +309,11 @@ export const api = {
     if (error) throw error;
     return project;
   },
-  listProjects: async () => {
+  listProjects: async (limit = 200) => {
     const user = await currentUser();
     const { data, error } = await getSupabase().from('projects').select('data')
-      .eq('user_id', user.id).order('created_at', { ascending: false }).limit(200);
+      .eq('user_id', user.id).order('created_at', { ascending: false })
+      .limit(Math.max(1, Math.min(200, Math.floor(limit))));
     if (error) throw error;
     return (data || []).map((row: any) => row.data);
   },
@@ -338,12 +394,10 @@ export const api = {
         review_available: false, review_pending: true,
         reason: 'Your clip is saved. AI is checking the framing in the background.',
       };
-      const [project, signedResult] = await Promise.all([
+      const [project, signedByPath] = await Promise.all([
         readProject(project_id),
-        storage.createSignedUrls([frame_storage_path, video_storage_path], 3600),
+        signMediaPaths([frame_storage_path, video_storage_path]),
       ]);
-      if (signedResult.error) throw signedResult.error;
-      const signedByPath = new Map((signedResult.data || []).map((item) => [item.path, item.signedUrl]));
       const clip = {
         shot_index, clip_id: stamp, duration_seconds, quality: pendingQuality,
         brightness: Math.max(-0.5, Math.min(0.5, brightness)), recorded_at: new Date().toISOString(),
