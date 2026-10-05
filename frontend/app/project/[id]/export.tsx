@@ -666,16 +666,16 @@ export default function Export() {
               </Pressable>
             )}
           </View>
-          <View style={styles.trackRow}>
+          <Pressable style={styles.trackRow} onPress={() => openTool('Audio')} accessibilityLabel="Edit audio track">
             <Ionicons name="musical-notes" size={17} color="#B9BBC3" />
             <Text style={styles.trackPlaceholder} numberOfLines={1}>{project?.soundtrack?.title || 'Tap to add audio'}</Text>
             {!!project?.soundtrack?.title && <Text style={styles.trackTag}>AUDIO</Text>}
-          </View>
-          <View style={styles.trackRow}>
+          </Pressable>
+          <Pressable style={styles.trackRow} onPress={() => openTool('Text')} accessibilityLabel="Edit text track">
             <Text style={styles.trackAa}>Aa</Text>
             <Text style={styles.trackPlaceholder} numberOfLines={1}>{settings.title_text || 'Tap to add text'}</Text>
             {!!settings.captions_enabled && <Text style={styles.trackTag}>CAPTIONS</Text>}
-          </View>
+          </Pressable>
           {orderedClips.length ? <View pointerEvents="none" style={styles.playhead} /> : null}
           <Text style={styles.timelineHint}>Drag a clip edge to trim · Tap a clip to preview</Text>
         </View>
