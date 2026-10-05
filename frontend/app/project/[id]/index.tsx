@@ -19,6 +19,7 @@ export default function ProjectDetail() {
   const [proj, setProj] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [startingShooting, setStartingShooting] = useState(false);
   const [storyboardNotice, setStoryboardNotice] = useState('');
 
   const load = useCallback(async () => {
@@ -55,6 +56,30 @@ export default function ProjectDetail() {
     }
   };
 
+  const startShooting = async () => {
+    if (!id || startingShooting) return;
+    let targetProject = proj;
+    const needsCompletePlan = (proj.storyboard || []).length > 0 && (proj.storyboard || []).length < 4
+      && proj.storyboard_ai_generated !== false && proj.storyboard_user_edited !== true
+      && !(proj.clips || []).length;
+    if (needsCompletePlan) {
+      setStartingShooting(true);
+      try {
+        await api.storyboard(id);
+        targetProject = await api.getProject(id);
+        setProj(targetProject);
+      } catch (error: any) {
+        Alert.alert('Could not finish the shot plan', error?.message || 'Please try again.');
+        setStartingShooting(false);
+        return;
+      }
+      setStartingShooting(false);
+    }
+    const saved = new Set((targetProject.clips || []).map((clip: any) => Number(clip.shot_index)));
+    const pending = (targetProject.storyboard || []).findIndex((_shot: any, index: number) => !saved.has(index));
+    router.push({ pathname: '/project/[id]/camera', params: { id, shot: String(pending >= 0 ? pending : 0) } });
+  };
+
   if (loading || !proj) {
     return (
       <View style={[styles.root, { alignItems: 'center', justifyContent: 'center' }]}>
@@ -65,7 +90,6 @@ export default function ProjectDetail() {
 
   const captured = (proj.storyboard || []).filter((s: any) => s.status === 'captured').length;
   const total = (proj.storyboard || []).length;
-
   return (
     <View style={styles.root} testID="project-detail-screen">
       <SafeAreaView edges={['top']} style={{ flex: 1 }}>
@@ -187,11 +211,12 @@ export default function ProjectDetail() {
                 <Text style={styles.actionText}>{t('scene_scan_label')}</Text>
               </Pressable>
 
-              <Pressable style={styles.primary}
-                onPress={() => router.push({ pathname: '/project/[id]/camera', params: { id: id!, shot: '0' } })}
+              <Pressable style={[styles.primary, startingShooting && { opacity: 0.7 }]}
+                onPress={() => void startShooting()}
+                disabled={startingShooting}
                 testID="project-start-shooting">
-                <Ionicons name="videocam" size={18} color="#fff" />
-                <Text style={styles.primaryText}>{captured === 0 ? t('start_shooting') : captured < total ? t('continue_shooting') : t('reshoot')}</Text>
+                {startingShooting ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="videocam" size={18} color="#fff" />}
+                <Text style={styles.primaryText}>{startingShooting ? t('prepare_scenes') : captured === 0 ? t('start_shooting') : captured < total ? t('continue_shooting') : t('reshoot')}</Text>
               </Pressable>
 
               {captured >= 1 && (

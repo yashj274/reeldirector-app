@@ -83,6 +83,7 @@ class ProjectOut(BaseModel):
 
 class SceneScanIn(BaseModel):
     image_base64: str  # jpeg base64 without header
+    frames: Optional[List[str]] = None
     project_id: Optional[str] = None
     language: Optional[str] = None
 
@@ -1036,8 +1037,13 @@ Make it cinematic, practical to film on a phone, and tailored to {doc['platform'
             script = str(response_data.get("script") or "").strip()
         else:
             shots = response_data
-        if not isinstance(shots, list) or not shots:
-            raise ValueError("bad storyboard")
+        if not isinstance(shots, list) or not 4 <= len(shots) <= 8 or any(not isinstance(shot, dict) for shot in shots):
+            raise ValueError("storyboard must contain four to eight valid shots")
+        required_text = ("title", "description", "direction")
+        if any(not all(isinstance(shot.get(key), str) and shot[key].strip() for key in required_text) for shot in shots):
+            raise ValueError("storyboard shot text is incomplete")
+        if any(not 1.5 <= float(shot.get("duration_seconds", 0)) <= 12 for shot in shots):
+            raise ValueError("storyboard shot durations are invalid")
     except Exception as e:
         log.warning("storyboard generation unavailable; using local fallback: %s", e)
         ai_generated = False
@@ -1055,14 +1061,15 @@ Make it cinematic, practical to film on a phone, and tailored to {doc['platform'
 
     doc.update({"storyboard": shots, "script": script, "status": "storyboarded",
                 "storyboard_ai_generated": ai_generated,
+                "storyboard_user_edited": False,
                 "updated_at": datetime.now(timezone.utc).isoformat()})
     await save_project(doc, user["id"])
     return {"storyboard": shots, "ai_generated": ai_generated}
 
 
 # ---------------- AI: Environment Scanner (vision) ----------------
-SCAN_SYSTEM = """You are an expert cinematographer analyzing a live camera view.
-Look at the image and return ONLY a compact JSON object with these keys:
+SCAN_SYSTEM = """You are an expert cinematographer analyzing several views of one filming environment.
+Compare all supplied frames as one place, then return ONLY a compact JSON object with these keys:
 - summary (1 short sentence describing the scene)
 - lighting (one of: natural_bright, natural_soft, natural_low, indoor_warm, indoor_cool, mixed, backlit)
 - lighting_quality_score (0-100)
@@ -1093,10 +1100,11 @@ Creator's explanation: {doc.get('purpose') or 'not supplied'}
 Shoot type: {doc.get('shoot_type') or 'general'}
 Keep event and cultural context in mind, but describe only visual evidence in the frame."""
     try:
+        frames = [frame for frame in (body.frames or []) if frame][:4] or [body.image_base64]
         raw = await chat_once(
             SCAN_SYSTEM,
-            f"Analyze this camera view for the user's planned video. Return all descriptive text in {language}.\n{context}",
-            [body.image_base64],
+            f"Analyze these {len(frames)} views of the same filming environment for the user's planned video. Combine evidence across views, avoid guessing objects that are not visible, and return all descriptive text in {language}.\n{context}",
+            frames,
         )
         data = extract_json(raw)
         if not isinstance(data, dict):
@@ -1843,7 +1851,8 @@ async def update_storyboard(pid: str, body: StoryboardPatch, user=Depends(curren
     for i, s in enumerate(body.shots):
         s["index"] = i
         s.setdefault("status", "pending")
-    doc.update({"storyboard": body.shots, "updated_at": datetime.now(timezone.utc).isoformat()})
+    doc.update({"storyboard": body.shots, "storyboard_user_edited": True,
+                "updated_at": datetime.now(timezone.utc).isoformat()})
     await save_project(doc, user["id"])
     return {"storyboard": body.shots}
 

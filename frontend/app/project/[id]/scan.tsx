@@ -19,36 +19,93 @@ export default function Scan() {
   const t = useT();
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
+  const [cameraReady, setCameraReady] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [framesCaptured, setFramesCaptured] = useState(0);
   const [generating, setGenerating] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [project, setProject] = useState<any>(null);
   const [scanError, setScanError] = useState('');
+  const scanActiveRef = useRef(false);
+  const scanFramesRef = useRef<string[]>([]);
+  const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const captureTaskRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => { if (id) api.getProject(id).then(setProject).catch(() => {}); }, [id]);
+  useEffect(() => () => {
+    scanActiveRef.current = false;
+    if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
+  }, []);
 
-  const doScan = async () => {
-    if (!cameraRef.current) return;
+  const startScan = () => {
+    if (!cameraRef.current || !cameraReady || !id || scanning || analyzing) return;
+    scanFramesRef.current = [];
+    setFramesCaptured(0);
+    setResult(null);
+    setScanError('');
+    scanActiveRef.current = true;
     setScanning(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    const captureNext = async () => {
+      try {
+        const photo = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.35, skipProcessing: true });
+        if (photo?.base64) {
+          scanFramesRef.current = [...scanFramesRef.current, photo.base64].slice(-4);
+          setFramesCaptured(scanFramesRef.current.length);
+        }
+      } catch (error) {
+        console.warn('Environment scan frame capture failed:', error);
+        if (!scanFramesRef.current.length) setScanError('Could not capture a view. Check camera access and try again.');
+      }
+      if (scanActiveRef.current && scanFramesRef.current.length < 4) {
+        scanTimerRef.current = setTimeout(() => {
+          const nextCapture = captureNext();
+          captureTaskRef.current = nextCapture;
+          void nextCapture;
+        }, 900);
+      }
+    };
+    const firstCapture = captureNext();
+    captureTaskRef.current = firstCapture;
+    void firstCapture;
+  };
+
+  const stopScan = async () => {
+    if (!scanning || analyzing) return;
+    scanActiveRef.current = false;
+    if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
+    scanTimerRef.current = null;
+    setScanning(false);
+    setAnalyzing(true);
+    if (captureTaskRef.current) await captureTaskRef.current;
+    captureTaskRef.current = null;
+    const frames = scanFramesRef.current;
+    if (!frames.length || !id) {
+      setScanError('Hold the camera steady for a moment so the scan can capture a view, then try again.');
+      setAnalyzing(false);
+      return;
+    }
+    setScanError('');
     try {
-      const photo = await cameraRef.current.takePictureAsync({ base64: true, quality: 0.5, skipProcessing: true });
-      if (!photo?.base64) throw new Error('no image');
-      const r = await api.scan(id!, photo.base64);
+      const r = await api.scan(id, frames[frames.length - 1], frames);
       setResult(r);
-      setScanError('');
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-    } catch (e) {
-      console.warn(e);
-      setScanError(e instanceof Error ? e.message : 'Could not analyze this scene. Try again.');
-    } finally { setScanning(false); }
+    } catch (error) {
+      console.warn(error);
+      setScanError(error instanceof Error ? error.message : 'Could not analyze this scene. Try again.');
+    } finally {
+      setAnalyzing(false);
+    }
   };
 
   const continueFromScan = async () => {
     if (!id) return;
     const hasRecordedClips = (project?.clips || []).length > 0;
     if (project?.storyboard?.length && hasRecordedClips) {
-      router.replace({ pathname: '/project/[id]/camera', params: { id, shot: '0' } });
+      const recorded = new Set((project.clips || []).map((clip: any) => Number(clip.shot_index)));
+      const nextShot = (project.storyboard || []).findIndex((_shot: any, index: number) => !recorded.has(index));
+      router.replace({ pathname: '/project/[id]/camera', params: { id, shot: String(Math.max(0, nextShot)) } });
       return;
     }
     setGenerating(true);
@@ -81,7 +138,7 @@ export default function Scan() {
 
   return (
     <View style={styles.root} testID="scan-screen">
-      <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
+      <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" onCameraReady={() => setCameraReady(true)} />
       <SafeAreaView style={{ flex: 1 }}>
         <View style={styles.topBar}>
           <Pressable style={styles.iconBtn} onPress={() => router.back()} testID="scan-back">
@@ -139,22 +196,29 @@ export default function Scan() {
                 {!!scanError && <Text style={styles.error}>{scanError}</Text>}
               </View>
             </View>
+          ) : analyzing ? (
+            <View style={styles.scanStatus} testID="scan-analyzing">
+              <ActivityIndicator color="#fff" />
+              <Text style={styles.scanBtnText}>{t('analyzing_scene')}</Text>
+            </View>
+          ) : scanning ? (
+            <View style={styles.scanControls}>
+              <Text style={styles.scanCount}>{t('scan_views_captured').replace('{count}', String(framesCaptured))}</Text>
+              <Pressable style={[styles.scanBtn, styles.stopBtn]} onPress={() => void stopScan()} testID="scan-stop">
+                <Ionicons name="stop" size={20} color="#fff" />
+                <Text style={styles.scanBtnText}>{t('scan_stop')}</Text>
+              </Pressable>
+            </View>
           ) : (
-            <Pressable style={styles.scanBtn} onPress={doScan} disabled={scanning} testID="scan-shutter">
-              {scanning ? (
-                <>
-                  <ActivityIndicator color="#fff" />
-                  <Text style={styles.scanBtnText}>{t('analyzing_scene')}</Text>
-                </>
-              ) : (
-                <>
-                  <Ionicons name="scan" size={22} color="#fff" />
-                  <Text style={styles.scanBtnText}>{t('scan_scene')}</Text>
-                </>
-              )}
-            </Pressable>
+            <View style={styles.scanControls}>
+              <Pressable style={[styles.scanBtn, !cameraReady && { opacity: 0.65 }]} onPress={startScan} disabled={!cameraReady} testID="scan-start">
+                {!cameraReady ? <ActivityIndicator color="#fff" /> : <Ionicons name="scan" size={22} color="#fff" />}
+                <Text style={styles.scanBtnText}>{cameraReady ? t('scan_start') : t('starting_camera')}</Text>
+              </Pressable>
+              <Text style={styles.scanCount}>{t('scan_capture_hint')}</Text>
+            </View>
           )}
-          {!result && <Text style={styles.scanIntro}>{t('scan_explainer')}</Text>}
+          {!result && !scanning && !analyzing && <Text style={styles.scanIntro}>{t('scan_explainer')}</Text>}
           {!!scanError && !result && <Text style={styles.error}>{scanError}</Text>}
           {!result && <Pressable onPress={skipScan} testID="scan-skip"><Text style={styles.skipText}>{t('skip_scan')}</Text></Pressable>}
         </View>
@@ -196,7 +260,11 @@ const styles = StyleSheet.create({
   reticle: { position: 'absolute', top: '30%', left: '15%', right: '15%', bottom: '35%' },
   corner: { position: 'absolute', width: 26, height: 26, borderColor: '#fff' },
   bottomWrap: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 16 },
+  scanControls: { alignItems: 'center', gap: 10 },
+  scanCount: { color: 'rgba(255,255,255,0.85)', fontSize: 13, fontWeight: '600', textAlign: 'center' },
+  scanStatus: { flexDirection: 'row', gap: 10, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.72)', paddingHorizontal: 22, height: 54, borderRadius: theme.radius.pill, alignItems: 'center', justifyContent: 'center' },
   scanBtn: { flexDirection: 'row', gap: 10, alignSelf: 'center', backgroundColor: theme.color.brand, paddingHorizontal: 28, height: 60, borderRadius: theme.radius.pill, alignItems: 'center', justifyContent: 'center' },
+  stopBtn: { backgroundColor: '#A82537' },
   scanBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   resultSheet: { borderRadius: theme.radius.lg, overflow: 'hidden' },
   resTitle: { color: '#fff', fontSize: 20, fontWeight: '700' },

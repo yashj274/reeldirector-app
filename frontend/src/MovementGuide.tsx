@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react';
-import { Animated, Easing, StyleSheet, View } from 'react-native';
+import { Animated, Easing, Platform, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 type Props = { movement?: string; label: string; movementLabel?: string };
@@ -14,15 +14,16 @@ export function MovementGuide({ movement = 'static', label, movementLabel }: Pro
   const progress = useRef(new Animated.Value(0)).current;
   const normalized = movement.toLowerCase().trim().replace(/[\s-]+/g, '_');
   const loopAnimation = useMemo(() => {
+    const useNativeDriver = Platform.OS !== 'web';
     const outward = Animated.timing(progress, {
-      toValue: 1, duration: normalized === 'static' ? 950 : 1450,
-      easing: Easing.inOut(Easing.ease), useNativeDriver: true,
+      toValue: 1, duration: normalized === 'static' ? 750 : 1350,
+      easing: Easing.inOut(Easing.ease), useNativeDriver,
     });
     const inward = Animated.timing(progress, {
-      toValue: 0, duration: normalized === 'static' ? 950 : 1450,
-      easing: Easing.inOut(Easing.ease), useNativeDriver: true,
+      toValue: 0, duration: normalized === 'static' ? 750 : 1350,
+      easing: Easing.inOut(Easing.ease), useNativeDriver,
     });
-    const reset = Animated.timing(progress, { toValue: 0, duration: 1, useNativeDriver: true });
+    const reset = Animated.timing(progress, { toValue: 0, duration: 1, useNativeDriver });
     const sequence = normalized === 'static' || normalized === 'handheld'
       ? [outward, inward]
       : [outward, Animated.delay(650), reset];
@@ -34,23 +35,24 @@ export function MovementGuide({ movement = 'static', label, movementLabel }: Pro
     return () => loopAnimation.stop();
   }, [loopAnimation]);
 
-  const xRange = normalized === 'pan_left' ? [18, -18]
-    : normalized === 'pan_right' || normalized === 'tracking' || normalized === 'reveal' ? [-18, 18]
-      : normalized === 'orbit' ? [-12, 12] : [0, 0];
-  const yRange = normalized === 'tilt_up' ? [14, -14]
-    : normalized === 'tilt_down' ? [-14, 14] : [0, 0];
+  const xRange = normalized === 'pan_left' ? [30, -30]
+    : normalized === 'pan_right' || normalized === 'tracking' || normalized === 'reveal' ? [-30, 30]
+      : normalized === 'orbit' ? [-22, 22] : [0, 0];
+  const yRange = normalized === 'tilt_up' ? [24, -24]
+    : normalized === 'tilt_down' ? [-24, 24] : [0, 0];
   const translateX = progress.interpolate({ inputRange: [0, 1], outputRange: xRange });
   const translateY = progress.interpolate({ inputRange: [0, 1], outputRange: yRange });
   const rotate = normalized === 'orbit' || normalized === 'handheld'
     ? progress.interpolate({ inputRange: [0, 1], outputRange: normalized === 'orbit' ? ['-12deg', '12deg'] : ['-3deg', '3deg'] }) : '0deg';
   const subjectScale = normalized === 'dolly_in'
-    ? progress.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1.3] })
-    : normalized === 'dolly_out' ? progress.interpolate({ inputRange: [0, 1], outputRange: [1.3, 0.7] }) : 1;
+    ? progress.interpolate({ inputRange: [0, 1], outputRange: [0.72, 1.32] })
+    : normalized === 'dolly_out' ? progress.interpolate({ inputRange: [0, 1], outputRange: [1.32, 0.72] })
+      : normalized === 'static' ? progress.interpolate({ inputRange: [0, 1], outputRange: [1, 1.08] }) : 1;
   const revealOpacity = normalized === 'reveal'
     ? progress.interpolate({ inputRange: [0, 0.55, 1], outputRange: [0.15, 0.45, 1] }) : 0.5;
 
   return (
-    <View pointerEvents="none" style={styles.wrap} accessibilityLabel={`${label}: ${movementLabel || movement.replace(/_/g, ' ')}`}>
+    <View pointerEvents="none" style={styles.wrap} accessibilityLabel={`${label}: ${movementLabel || movement.replace(/_/g, ' ')}`} testID="camera-movement-guide">
       {normalized === 'reveal' && (
         <Animated.View style={[styles.revealedScene, { opacity: revealOpacity }]}>
           <Ionicons name="sparkles-outline" size={24} color="#fff" />
@@ -76,7 +78,7 @@ export function MovementGuide({ movement = 'static', label, movementLabel }: Pro
 const styles = StyleSheet.create({
   wrap: {
     position: 'absolute', alignSelf: 'center', top: '37%', alignItems: 'center',
-    opacity: 0.76, zIndex: 1, width: 190, height: 150,
+    opacity: 0.78, zIndex: 1, width: 210, height: 170,
   },
   revealedScene: { position: 'absolute', top: 38, left: 24 },
   deviceAndHand: { width: 68, height: 116 },

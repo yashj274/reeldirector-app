@@ -152,6 +152,7 @@ export default function DirectorCamera() {
 
   const [project, setProject] = useState<any>(null);
   const [shotIndex, setShotIndex] = useState<number>(shot ? parseInt(shot) : 0);
+  const shotIndexRef = useRef(shot ? parseInt(shot) : 0);
   const [instruction, setInstruction] = useState<{ text: string; arrow: string; ready: boolean } | null>(null);
   const [recording, setRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
@@ -181,8 +182,19 @@ export default function DirectorCamera() {
 
   useEffect(() => {
     if (!id) return;
-    api.getProject(id).then(setProject).catch(() => {});
-  }, [id]);
+    api.getProject(id).then((loaded) => {
+      setProject(loaded);
+      const requested = Math.max(0, Number.parseInt(shot || '0', 10) || 0);
+      const existing = (loaded.clips || []).some((clip: any) => Number(clip.shot_index) === requested);
+      const firstUnfilmed = (loaded.storyboard || []).findIndex((_item: any, index: number) =>
+        !(loaded.clips || []).some((clip: any) => Number(clip.shot_index) === index));
+      const selected = existing && firstUnfilmed >= 0 ? firstUnfilmed : requested;
+      shotIndexRef.current = selected;
+      setShotIndex(selected);
+    }).catch(() => {});
+  }, [id, shot]);
+
+  useEffect(() => { shotIndexRef.current = shotIndex; }, [shotIndex]);
 
   const openWebCamera = useCallback(async (preferredFacing = facing) => {
     if (Platform.OS !== 'web') return;
@@ -245,9 +257,21 @@ export default function DirectorCamera() {
           const mimeType = file.type || (file.name.toLowerCase().endsWith('.mov') ? 'video/quicktime' : 'video/mp4');
           const result = await api.clipQuality(id, shotIndex, frame.frameBase64, frame.durationSeconds, {
             blob: file, mimeType,
-          }, brightness);
-          setQuality(result);
-          setProject(await api.getProject(id));
+          }, brightness, (review) => {
+            if (shotIndexRef.current === shotIndex) {
+              setQuality(review);
+              setProject((current: any) => current ? {
+                ...current,
+                clips: (current.clips || []).map((clip: any) => clip.shot_index === shotIndex
+                  ? { ...clip, quality: review } : clip),
+                storyboard: (current.storyboard || []).map((item: any) => item.index === shotIndex
+                  ? { ...item, status: review.recommendation === 'retake_required' ? 'retake' : 'captured' } : item),
+              } : current);
+            }
+          }, (savedProject) => {
+            setProject(savedProject);
+          });
+          setQuality((current: any) => current?.review_pending === false ? current : result);
         } catch (error: any) {
           console.warn('Phone video upload failed:', error);
           setCameraError(error?.message || 'Could not save this video. Check your connection and try again.');
@@ -556,9 +580,21 @@ export default function DirectorCamera() {
       if (id) {
         const q = await api.clipQuality(id, shotIndex, frameBase64, dur, {
           uri: recorded.uri, blob: recorded.blob, mimeType: recorded.mimeType,
-        }, brightness);
-        setQuality(q);
-        setProject(await api.getProject(id));
+        }, brightness, (review) => {
+          if (shotIndexRef.current === shotIndex) {
+            setQuality(review);
+            setProject((current: any) => current ? {
+              ...current,
+              clips: (current.clips || []).map((clip: any) => clip.shot_index === shotIndex
+                ? { ...clip, quality: review } : clip),
+              storyboard: (current.storyboard || []).map((item: any) => item.index === shotIndex
+                ? { ...item, status: review.recommendation === 'retake_required' ? 'retake' : 'captured' } : item),
+            } : current);
+          }
+        }, (savedProject) => {
+          setProject(savedProject);
+        });
+        setQuality((current: any) => current?.review_pending === false ? current : q);
       }
     } catch (e) {
       console.warn('Recording or upload failed:', e);
@@ -579,16 +615,22 @@ export default function DirectorCamera() {
   };
 
   const nextShot = async () => {
-    setQuality(null);
-    const total = project?.storyboard?.length || 0;
-    if (shotIndex + 1 < total) {
-      setShotIndex(shotIndex + 1);
-    } else {
-      // done - go to review or export
-      const fresh = await api.getProject(id!);
-      setProject(fresh);
-      router.replace({ pathname: '/project/[id]/export', params: { id: id! } });
+    if (!id) return;
+    const clips = project?.clips || [];
+    const storyboard = project?.storyboard || [];
+    const afterCurrent = storyboard.findIndex((_item: any, index: number) =>
+      index > shotIndex && !clips.some((clip: any) => Number(clip.shot_index) === index));
+    const anyPending = afterCurrent >= 0 ? afterCurrent : storyboard.findIndex((_item: any, index: number) =>
+      !clips.some((clip: any) => Number(clip.shot_index) === index));
+    if (anyPending >= 0) {
+      shotIndexRef.current = anyPending;
+      setShotIndex(anyPending);
+      setQuality(null);
+      setCameraError(null);
+      return;
     }
+    setQuality(null);
+    router.replace({ pathname: '/project/[id]/export', params: { id } });
   };
 
   const retake = async () => {
@@ -666,6 +708,13 @@ export default function DirectorCamera() {
     }
   };
   const currentMovement = String(shotObj?.camera_movement || 'static').toLowerCase().trim().replace(/[\s-]+/g, '_');
+  const storyboardShots = project?.storyboard || [];
+  const savedShotIndexes = new Set((project?.clips || []).map((clip: any) => Number(clip.shot_index)));
+  const nextUnfilmedAfterCurrent = storyboardShots.findIndex((_item: any, index: number) =>
+    index > shotIndex && !savedShotIndexes.has(index));
+  const firstUnfilmedShot = storyboardShots.findIndex((_item: any, index: number) => !savedShotIndexes.has(index));
+  const upcomingShot = nextUnfilmedAfterCurrent >= 0 ? nextUnfilmedAfterCurrent : firstUnfilmedShot;
+  const hasUpcomingShot = upcomingShot >= 0;
   const movementLabel = ['static', 'pan_left', 'pan_right', 'tilt_up', 'tilt_down', 'dolly_in', 'dolly_out', 'tracking', 'orbit', 'reveal', 'handheld'].includes(currentMovement)
     ? t(`move_${currentMovement}`) : t('hold_camera_steady');
 
@@ -764,7 +813,7 @@ export default function DirectorCamera() {
           </View>
         )}
 
-        {!quality && !!shotObj?.camera_movement && <MovementGuide movement={shotObj.camera_movement} label={t('move_guide')} movementLabel={movementLabel} />}
+        {!quality && <MovementGuide movement={shotObj?.camera_movement || 'static'} label={t('move_guide')} movementLabel={movementLabel} />}
 
         {/* Right-side quick controls */}
         {!quality && !recording && (
@@ -835,18 +884,23 @@ export default function DirectorCamera() {
             <BlurView tint="dark" intensity={70} style={StyleSheet.absoluteFill} />
             <View style={{ padding: 20 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                {quality.review_available === false ? (
+                {quality.review_available === false && !quality.review_pending ? (
                   <Ionicons name="eye-outline" size={30} color={theme.color.warning} />
+                ) : quality.review_pending ? (
+                  <ActivityIndicator size="large" color={theme.color.brand} />
                 ) : (
                   <View style={[styles.qBadge, { backgroundColor: quality.recommendation === 'retake_required' ? theme.color.error : quality.recommendation === 'retake_optional' ? theme.color.warning : theme.color.success }]}>
                     <Text style={styles.qBadgeText}>{Math.round(quality.overall_score)}</Text>
                   </View>
                 )}
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.qTitle}>{quality.review_available === false ? t('clip_saved') : quality.recommendation === 'keep' ? t('great_shot') : quality.recommendation === 'retake_optional' ? t('retake_suggested') : t('retake_required')}</Text>
-                  <Text style={styles.qReason} numberOfLines={2}>{quality.review_available === false ? t('rating_unavailable') : quality.reason}</Text>
+                  <Text style={styles.qTitle}>{quality.review_pending ? t('rating_pending') : quality.review_available === false ? t('clip_saved') : quality.recommendation === 'keep' ? t('great_shot') : quality.recommendation === 'retake_optional' ? t('retake_suggested') : t('retake_required')}</Text>
+                  <Text style={styles.qReason} numberOfLines={2}>{quality.review_pending ? quality.reason : quality.review_available === false ? t('rating_unavailable') : quality.reason}</Text>
                 </View>
               </View>
+              <Text style={styles.shotSavedCounter} testID="camera-shot-saved">
+                {t('shot_saved_counter').replace('{current}', String(shotIndex + 1)).replace('{total}', String(project?.storyboard?.length || 1))}
+              </Text>
 
               {quality.review_available !== false && <View style={styles.qGrid}>
                 <QSlot label={t('blur')} v={quality.blur_score} />
@@ -883,7 +937,9 @@ export default function DirectorCamera() {
                   <Text style={styles.ghostText}>{t('retake')}</Text>
                 </Pressable>
                 <Pressable style={styles.primary} onPress={nextShot} testID="camera-next">
-                  <Text style={styles.primaryText}>{shotIndex + 1 < (project?.storyboard?.length || 0) ? t('next_shot') : t('finish_edit')}</Text>
+                  <Text style={styles.primaryText}>{hasUpcomingShot
+                    ? t('next_shot_counter').replace('{current}', String(upcomingShot + 1)).replace('{total}', String(storyboardShots.length))
+                    : t('finish_edit')}</Text>
                   <Ionicons name="arrow-forward" size={16} color="#fff" />
                 </Pressable>
               </View>
@@ -895,7 +951,7 @@ export default function DirectorCamera() {
               <View style={styles.analyzing}>
                 <BlurView tint="dark" intensity={50} style={StyleSheet.absoluteFill} />
                 <ActivityIndicator color={theme.color.brand} />
-                <Text style={styles.analyzingText}>{t('checking_clip_frame')}</Text>
+                <Text style={styles.analyzingText}>{t('saving_clip')}</Text>
               </View>
             ) : (
               <>
@@ -995,6 +1051,7 @@ const styles = StyleSheet.create({
   qBadgeText: { color: '#fff', fontWeight: '800', fontSize: 16 },
   qTitle: { color: '#fff', fontSize: 17, fontWeight: '700' },
   qReason: { color: 'rgba(255,255,255,0.8)', fontSize: 13, marginTop: 2 },
+  shotSavedCounter: { color: 'rgba(255,255,255,0.82)', fontSize: 12, fontWeight: '700', marginTop: 14 },
   issuesList: { marginTop: 8, gap: 3 },
   qIssue: { color: 'rgba(255,255,255,0.84)', fontSize: 12 },
   qGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginTop: 16 },

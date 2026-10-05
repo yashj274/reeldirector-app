@@ -127,18 +127,21 @@ async function readProject(id: string) {
   if (error) throw error;
   if (!data?.data) throw new Error('Project not found');
   const project = data.data;
-  const signedUrl = async (path: string) => {
-    const { data: signed, error: signError } = await getSupabase().storage.from('project-media')
-      .createSignedUrl(path, 3600);
-    if (signError) throw signError;
-    return signed?.signedUrl || null;
-  };
-  if (project.export?.storage_path) project.export.url = await signedUrl(project.export.storage_path);
-  if (project.soundtrack?.storage_path) project.soundtrack.signed_url = await signedUrl(project.soundtrack.storage_path);
-  if (project.voiceover?.storage_path) project.voiceover.signed_url = await signedUrl(project.voiceover.storage_path);
+  const assets: { path: string; apply: (url: string | null) => void }[] = [];
+  if (project.export?.storage_path) assets.push({ path: project.export.storage_path, apply: (url) => { project.export.url = url; } });
+  if (project.soundtrack?.storage_path) assets.push({ path: project.soundtrack.storage_path, apply: (url) => { project.soundtrack.signed_url = url; } });
+  if (project.voiceover?.storage_path) assets.push({ path: project.voiceover.storage_path, apply: (url) => { project.voiceover.signed_url = url; } });
   for (const clip of project.clips || []) {
-    if (clip.video_storage_path) clip.video_url = await signedUrl(clip.video_storage_path);
-    if (clip.frame_storage_path) clip.frame_url = await signedUrl(clip.frame_storage_path);
+    if (clip.video_storage_path) assets.push({ path: clip.video_storage_path, apply: (url) => { clip.video_url = url; } });
+    if (clip.frame_storage_path) assets.push({ path: clip.frame_storage_path, apply: (url) => { clip.frame_url = url; } });
+  }
+  if (assets.length) {
+    const paths = [...new Set(assets.map((asset) => asset.path))];
+    const { data: signed, error: signError } = await getSupabase().storage.from('project-media')
+      .createSignedUrls(paths, 3600);
+    if (signError) throw signError;
+    const urlByPath = new Map((signed || []).map((entry) => [entry.path, entry.signedUrl]));
+    for (const asset of assets) asset.apply(urlByPath.get(asset.path) || null);
   }
   return project;
 }
@@ -287,8 +290,8 @@ export const api = {
   storyboard: async (id: string) => request(`/projects/${id}/storyboard`, {
     method: 'POST', body: JSON.stringify({ language: await getLanguage() }),
   }),
-  scan: async (project_id: string, image_base64: string) => request('/scan', {
-    method: 'POST', body: JSON.stringify({ project_id, image_base64, language: await getLanguage() }),
+  scan: async (project_id: string, image_base64: string, frames: string[] = []) => request('/scan', {
+    method: 'POST', body: JSON.stringify({ project_id, image_base64, frames, language: await getLanguage() }),
   }),
   director: async (project_id: string, shot_index: number, image_base64?: string) =>
     request('/director/instruct', {
@@ -301,6 +304,8 @@ export const api = {
     duration_seconds: number,
     video: { uri?: string; blob?: Blob; mimeType?: string },
     brightness = 0,
+    onReview?: (quality: any) => void,
+    onSaved?: (project: any) => void,
   ) => {
     const user = await currentUser();
     const language = await getLanguage();
@@ -315,46 +320,73 @@ export const api = {
     const uploaded: string[] = [];
     try {
       const storage = getSupabase().storage.from('project-media');
-      const { error: frameError } = await storage.upload(
-        frame_storage_path, decode(frame_base64), { contentType: 'image/jpeg', upsert: false },
-      );
-      if (frameError) throw frameError;
-      uploaded.push(frame_storage_path);
-
       const videoBytes = video.blob
         ? video.blob
         : await new (await import('expo-file-system')).File(video.uri!).arrayBuffer();
-      const { error: videoError } = await storage.upload(
-        video_storage_path, videoBytes, { contentType: mimeType, upsert: false },
-      );
-      if (videoError) throw videoError;
-      uploaded.push(video_storage_path);
+      const [frameUpload, videoUpload] = await Promise.all([
+        storage.upload(frame_storage_path, decode(frame_base64), { contentType: 'image/jpeg', upsert: false }),
+        storage.upload(video_storage_path, videoBytes, { contentType: mimeType, upsert: false }),
+      ]);
+      if (!frameUpload.error) uploaded.push(frame_storage_path);
+      if (!videoUpload.error) uploaded.push(video_storage_path);
+      if (frameUpload.error) throw frameUpload.error;
+      if (videoUpload.error) throw videoUpload.error;
 
-      let quality: any;
-      try {
-        quality = await request('/clips/quality', {
+      const pendingQuality = {
+        overall_score: null, blur_score: null, exposure_score: null, composition_score: null,
+        stability_score: null, subject_visible: null, issues: [], recommendation: 'keep',
+        review_available: false, review_pending: true,
+        reason: 'Your clip is saved. AI is checking the framing in the background.',
+      };
+      const [project, signedResult] = await Promise.all([
+        readProject(project_id),
+        storage.createSignedUrls([frame_storage_path, video_storage_path], 3600),
+      ]);
+      if (signedResult.error) throw signedResult.error;
+      const signedByPath = new Map((signedResult.data || []).map((item) => [item.path, item.signedUrl]));
+      const clip = {
+        shot_index, clip_id: stamp, duration_seconds, quality: pendingQuality,
+        brightness: Math.max(-0.5, Math.min(0.5, brightness)), recorded_at: new Date().toISOString(),
+        frame_storage_path, video_storage_path,
+        frame_url: signedByPath.get(frame_storage_path) || null,
+        video_url: signedByPath.get(video_storage_path) || null,
+      };
+      const replacedClips = (project.clips || []).filter((item: any) => item.shot_index === shot_index);
+      const clips = [...(project.clips || []).filter((item: any) => item.shot_index !== shot_index), clip];
+      clips.sort((a: any, b: any) => a.shot_index - b.shot_index);
+      const storyboard = project.storyboard || [];
+      if (storyboard[shot_index]) storyboard[shot_index].status = 'captured';
+      const savedProject = { ...project, clips, storyboard, status: 'shooting' };
+      await updateProjectData(savedProject);
+      void deleteStoredFrames(replacedClips.flatMap((item: any) => [item.frame_storage_path, item.video_storage_path]).filter(Boolean));
+      onSaved?.(savedProject);
+
+      // Let the creator move to the next shot while Gemini reviews this frame.
+      void request('/clips/quality', {
           method: 'POST',
           body: JSON.stringify({ project_id, shot_index, frame_base64, duration_seconds, brightness, language, frame_storage_path, video_storage_path }),
+        }).then(async (quality) => {
+          const latest = await readProject(project_id);
+          const current = (latest.clips || []).find((item: any) => item.clip_id === stamp);
+          if (!current) return;
+          current.quality = { ...quality, review_pending: false };
+          if (latest.storyboard?.[shot_index]) {
+            latest.storyboard[shot_index].status = quality.recommendation === 'retake_required' ? 'retake' : 'captured';
+          }
+          await updateProjectData(latest);
+          onReview?.({ ...quality, review_pending: false });
+        }).catch((error) => {
+          console.warn('Background clip review failed:', error);
+          const unavailable = { ...pendingQuality, review_pending: false, reason: 'Clip saved. Automatic review is unavailable right now.' };
+          void readProject(project_id).then(async (latest) => {
+            const current = (latest.clips || []).find((item: any) => item.clip_id === stamp);
+            if (!current) return;
+            current.quality = unavailable;
+            await updateProjectData(latest);
+          }).catch(() => {});
+          onReview?.(unavailable);
         });
-      } catch {
-        quality = {
-          overall_score: null, blur_score: null, exposure_score: null, composition_score: null,
-          stability_score: null, subject_visible: null, issues: [], recommendation: 'keep',
-          review_available: false,
-          reason: 'Clip saved. Review this frame manually; automatic review is unavailable.',
-        };
-      }
-      const project = await readProject(project_id);
-      const clips = [...(project.clips || []), {
-        shot_index, duration_seconds, quality, brightness: Math.max(-0.5, Math.min(0.5, brightness)), recorded_at: new Date().toISOString(),
-        frame_storage_path, video_storage_path,
-      }];
-      const storyboard = project.storyboard || [];
-      if (storyboard[shot_index]) {
-        storyboard[shot_index].status = quality.recommendation === 'retake_required' ? 'retake' : 'captured';
-      }
-      await updateProjectData({ ...project, clips, storyboard, status: 'shooting' });
-      return quality;
+      return pendingQuality;
     } catch (error) {
       await deleteStoredFrames(uploaded);
       throw error;
@@ -372,7 +404,7 @@ export const api = {
       shots[i].index = i;
       shots[i].status ??= 'pending';
     }
-    await updateProjectData({ ...project, storyboard: shots, updated_at: new Date().toISOString() });
+    await updateProjectData({ ...project, storyboard: shots, storyboard_user_edited: true, updated_at: new Date().toISOString() });
     return { storyboard: shots };
   },
   regenerateShot: async (id: string, shot_index: number, notes?: string) => request(`/projects/${id}/storyboard/regenerate`, {
