@@ -416,11 +416,14 @@ export default function Export() {
       setPlayerDuration(duration || 0);
       preparePlayer(player);
     });
+    const statusSub = player.addListener('statusChange', ({ status }) => {
+      if (status === 'readyToPlay') preparePlayer(player);
+    });
     const playingSub = player.addListener('playingChange', ({ isPlaying }) => setPlaying(isPlaying));
     // A short clip can finish before React attaches listeners to its new player.
     // Check readiness after subscribing so the next segment still starts.
     preparePlayer(player);
-    return () => { timeSub.remove(); sourceSub.remove(); playingSub.remove(); };
+    return () => { timeSub.remove(); sourceSub.remove(); statusSub.remove(); playingSub.remove(); };
   }, [player, preparePlayer]);
 
   const pushHistory = (current: EditorSettings) => {
