@@ -80,6 +80,17 @@ const STRINGS: Record<string, Record<string, string>> = {
     try_again: 'Try again', sign_in_again: 'Sign in again', no_projects: 'No projects yet. Tap + to create one.',
     preferences: 'Preferences', account: 'Account', support: 'Support', language: 'Language', editing_style: 'Editing style',
     creator_skill_level: 'How much filming experience do you have?', skill_help: 'You can change this anytime. Beginner is the default.',
+    my_creator_style: 'My creator style', creator_style_help: 'Your choices and recent reels help personalize new shot plans.',
+    preferred_duration: 'Usual reel length', reset_style_profile: 'Reset style profile', reset_style_confirm: 'Clear learned choices and return to the default style?', reset: 'Reset',
+    creator_style_learned: 'Learned from {count} reels: {category}, {goal}, {pacing} pace, {text} on-screen text. Familiar moves: {movements}.',
+    creator_style_empty: 'Your style will learn from reels you create. You can set a look and length now.', not_enough_data: 'still learning',
+    create_in_my_style: 'Create in My Style', create_in_my_style_help: 'Use your saved look and choices for this reel.',
+    more_options: 'More options', fewer_options: 'Fewer options',
+    style_cinematic: 'Cinematic', style_fast_pace: 'Fast paced', style_minimal: 'Clean', style_editorial: 'Editorial', style_luxury: 'Luxury', style_action: 'Action',
+    goal_storytelling: 'storytelling', goal_showcase: 'showcase', goal_sales: 'sales', goal_education: 'education',
+    goal_entertainment: 'entertainment', goal_memory: 'memories', goal_brand_awareness: 'brand building',
+    pacing_relaxed: 'relaxed', pacing_balanced: 'balanced', pacing_fast: 'fast',
+    text_amount_minimal: 'minimal', text_amount_some: 'some', text_amount_more: 'more',
     beginner: 'Beginner', creator: 'Creator', pro: 'Pro',
     phase_hook: 'Hook', phase_detail: 'Detail', phase_action: 'Action', phase_hero: 'Hero', phase_cta: 'Ending',
     shot_current: 'Current', shot_done: 'Done', shot_upcoming: 'Upcoming', shot_retake: 'Retake', shot_skipped: 'Skipped', shot_plan: 'Shot plan',
@@ -122,7 +133,7 @@ const STRINGS: Record<string, Record<string, string>> = {
     shoot_type_gym: 'Gym', shoot_type_product: 'Product', shoot_type_real_estate: 'Real estate', shoot_type_cafe: 'Cafe',
     shoot_type_restaurant: 'Restaurant', shoot_type_event: 'Event', shoot_type_documentary: 'Documentary',
     shoot_type_business: 'Business', shoot_type_lifestyle: 'Lifestyle', shoot_type_daily_vlog: 'Daily vlog',
-    shoot_type_social_media: 'Social media', shoot_type_cinematic: 'Cinematic', mood_cinematic: 'Cinematic',
+    shoot_type_social_media: 'Social media', shoot_type_cinematic: 'Cinematic', shoot_type_other: 'Other', mood_cinematic: 'Cinematic',
     mood_emotional: 'Emotional', mood_energetic: 'Energetic', mood_luxury: 'Luxury', mood_minimal: 'Minimal', mood_warm: 'Warm',
     template_wedding: 'Wedding Cinema', template_travel: 'Travel Vlog', template_food: 'Food Cinematic',
     template_fashion: 'Fashion Editorial', template_gym: 'Gym Motivation', template_real_estate: 'Real Estate',
@@ -268,7 +279,7 @@ const notify = () => listeners.forEach((listener) => listener());
 const fallbackBackend = (Constants.expoConfig?.extra?.backendUrl || '').replace(/\/+$/, '');
 const translationRequests = new Map<string, Promise<void>>();
 const translationAttempts = new Set<string>();
-const TRANSLATION_CACHE_VERSION = 4;
+const TRANSLATION_CACHE_VERSION = 5;
 
 function fetchTranslations(code: string) {
   const active = translationRequests.get(code);

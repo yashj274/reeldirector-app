@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView,
   StyleSheet, Text, TextInput, View,
@@ -8,7 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 
-import { api } from '@/src/api';
+import { api, CreatorStyleProfile, getCreatorStyleProfile } from '@/src/api';
 import { getLanguage, useT } from '@/src/i18n';
 import { theme } from '@/src/theme';
 
@@ -24,12 +24,26 @@ const label = (id: string, t: (key: string) => string) => {
 };
 
 const MOODS = ['Cinematic', 'Emotional', 'Energetic', 'Luxury', 'Minimal', 'Warm'];
+const STYLES = ['cinematic', 'fast_pace', 'minimal', 'editorial', 'luxury', 'action'];
 const DURATIONS = [15, 20, 30, 45, 60];
 const PLATFORMS = [
   { id: 'instagram_reel', label: 'Instagram' },
   { id: 'tiktok', label: 'TikTok' },
   { id: 'youtube_shorts', label: 'YouTube' },
 ];
+
+function inferDefaults(value: string) {
+  const text = value.toLowerCase();
+  if (/wedding|mehndi|haldi|engagement|anniversary|ceremony|bride|groom/.test(text)) return { category: 'wedding', mood: 'Emotional', duration: 45, style: 'cinematic', specific: true };
+  if (/travel|trip|holiday|vacation|journey|mountain|beach/.test(text)) return { category: 'travel', mood: 'Cinematic', duration: 30, style: 'cinematic', specific: true };
+  if (/food|recipe|cafe|coffee|restaurant|dish|cook/.test(text)) return { category: 'food', mood: 'Warm', duration: 20, style: 'minimal', specific: true };
+  if (/fashion|outfit|clothes|lookbook|makeup|beauty/.test(text)) return { category: 'fashion', mood: 'Minimal', duration: 20, style: 'editorial', specific: true };
+  if (/gym|fitness|workout|training|exercise/.test(text)) return { category: 'gym', mood: 'Energetic', duration: 20, style: 'action', specific: true };
+  if (/house|home|property|apartment|room|hotel|interior/.test(text)) return { category: 'real_estate', mood: 'Luxury', duration: 45, style: 'luxury', specific: true };
+  if (/product|shop|launch|brand|business|sell|sale/.test(text)) return { category: 'product', mood: 'Minimal', duration: 15, style: 'minimal', specific: true };
+  if (/birthday|party|concert|festival|event|graduation/.test(text)) return { category: 'event', mood: 'Energetic', duration: 30, style: 'cinematic', specific: true };
+  return { category: 'social_media', mood: 'Cinematic', duration: 30, style: 'cinematic', specific: false };
+}
 
 export default function NewProject() {
   const router = useRouter();
@@ -38,19 +52,49 @@ export default function NewProject() {
 
   const [title, setTitle] = useState('');
   const [types, setTypes] = useState<string[]>(DEFAULT_TYPES);
-  const [shootType, setShootType] = useState<string>(params.template || 'travel');
+  const [shootType, setShootType] = useState<string>(params.template || 'social_media');
   const [mood, setMood] = useState<string>(params.mood?.split(' ')[0] || 'Cinematic');
   const [duration, setDuration] = useState<number>(params.duration ? parseInt(params.duration) : 30);
+  const [style, setStyle] = useState<string>((params.style as string) || 'cinematic');
   const [platform, setPlatform] = useState<string>('instagram_reel');
   const [audience, setAudience] = useState('');
   const [purpose, setPurpose] = useState('');
   const [busy, setBusy] = useState(false);
   const [createError, setCreateError] = useState('');
+  const [creatorProfile, setCreatorProfile] = useState<CreatorStyleProfile | null>(null);
+  const [useMyStyle, setUseMyStyle] = useState(false);
+  const [moreOptions, setMoreOptions] = useState(false);
+  const [choicesTouched, setChoicesTouched] = useState(false);
 
   const [customOpen, setCustomOpen] = useState(false);
   const [customName, setCustomName] = useState('');
 
   const canSubmit = useMemo(() => title.trim().length >= 2 && purpose.trim().length >= 10, [title, purpose]);
+
+  useEffect(() => {
+    void getCreatorStyleProfile().then((profile) => {
+      setCreatorProfile(profile);
+      if (!params.template && (profile.project_count > 0 || profile.has_preferences)) {
+        setUseMyStyle(true);
+        setMood(profile.mood);
+        setDuration(profile.duration_seconds);
+        setStyle(profile.style);
+      }
+    }).catch(() => {});
+  }, [params.template]);
+
+  useEffect(() => {
+    if (params.template || choicesTouched) return;
+    const defaults = inferDefaults(`${title} ${purpose}`);
+    setShootType(useMyStyle && !defaults.specific && creatorProfile?.project_count
+      ? (DEFAULT_TYPES.includes(creatorProfile.category) ? creatorProfile.category : defaults.category)
+      : defaults.category);
+    if (!useMyStyle) {
+      setMood(defaults.mood);
+      setDuration(defaults.duration);
+      setStyle(defaults.style);
+    }
+  }, [title, purpose, params.template, choicesTouched, useMyStyle, creatorProfile]);
 
   const addCustom = () => {
     const raw = customName.trim();
@@ -58,8 +102,22 @@ export default function NewProject() {
     const id = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
     if (!types.includes(id)) setTypes([id, ...types]);
     setShootType(id);
+    setChoicesTouched(true);
     setCustomName('');
     setCustomOpen(false);
+  };
+
+  const toggleMyStyle = () => {
+    const next = !useMyStyle;
+    setUseMyStyle(next);
+    setChoicesTouched(false);
+    if (next && creatorProfile) {
+      const inferred = inferDefaults(`${title} ${purpose}`);
+      setShootType(inferred.specific ? inferred.category : DEFAULT_TYPES.includes(creatorProfile.category) ? creatorProfile.category : 'social_media');
+      setMood(creatorProfile.mood);
+      setDuration(creatorProfile.duration_seconds);
+      setStyle(creatorProfile.style);
+    }
   };
 
   const submit = async () => {
@@ -71,7 +129,7 @@ export default function NewProject() {
     try {
       const p = await api.createProject({
         title: title.trim(), shoot_type: shootType, purpose, mood, duration_seconds: duration,
-        style: (params.style as string) || 'cinematic', platform, audience, language: await getLanguage(),
+        style, platform, audience, language: await getLanguage(), use_creator_style: useMyStyle,
       });
       router.replace({ pathname: '/project/[id]/scan', params: { id: p.id, flow: 'new' } });
     } catch (e: any) {
@@ -109,30 +167,6 @@ export default function NewProject() {
                 testID="new-project-title" />
             </View>
 
-            <Text style={styles.label}>{t('type_of_shoot')}</Text>
-            <View style={styles.chipRow}>
-              {types.map((id) => chip(shootType === id, label(id, t), () => setShootType(id), `chip-shoot-${id}`))}
-              <Pressable onPress={() => setCustomOpen(true)} style={[styles.chip, styles.chipAdd]} testID="chip-shoot-add-custom">
-                <Ionicons name="add" size={16} color={theme.color.brand} />
-                <Text style={[styles.chipText, { color: theme.color.brand, marginLeft: 4 }]}>{t('custom')}</Text>
-              </Pressable>
-            </View>
-
-            <Text style={styles.label}>{t('mood')}</Text>
-            <View style={styles.chipRow}>
-              {MOODS.map((m) => chip(mood === m, t(`mood_${m.toLowerCase()}`), () => setMood(m), `chip-mood-${m}`))}
-            </View>
-
-            <Text style={styles.label}>{t('duration')}</Text>
-            <View style={styles.chipRow}>
-              {DURATIONS.map((d) => chip(duration === d, `${d}s`, () => setDuration(d), `chip-dur-${d}`))}
-            </View>
-
-            <Text style={styles.label}>{t('platform')}</Text>
-            <View style={styles.chipRow}>
-              {PLATFORMS.map((p) => chip(platform === p.id, p.label, () => setPlatform(p.id), `chip-plat-${p.id}`))}
-            </View>
-
             <Text style={styles.label}>{t('purpose_label')} <Text style={{ color: theme.color.brand }}>*</Text></Text>
             <View style={[styles.input, styles.purposeInput]}>
               <TextInput value={purpose} onChangeText={(value) => { setPurpose(value); setCreateError(''); }}
@@ -143,12 +177,50 @@ export default function NewProject() {
             </View>
             <Text style={styles.helper}>{t('purpose_hint')}</Text>
 
-            <Text style={styles.label}>{t('target_audience')}</Text>
-            <View style={styles.input}>
-              <TextInput value={audience} onChangeText={setAudience} placeholder={t('audience_example')}
-                placeholderTextColor={theme.color.onSurface3} style={styles.text}
-                testID="new-project-audience" />
-            </View>
+            <Pressable style={[styles.myStyle, useMyStyle && styles.myStyleOn]} onPress={toggleMyStyle}
+              accessibilityRole="checkbox" accessibilityState={{ checked: useMyStyle }} testID="new-project-use-my-style">
+              <Ionicons name={useMyStyle ? 'checkbox' : 'square-outline'} size={22} color={useMyStyle ? theme.color.brand : theme.color.onSurface3} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.myStyleTitle}>{t('create_in_my_style')}</Text>
+                <Text style={styles.myStyleHint}>{t('create_in_my_style_help')}</Text>
+              </View>
+            </Pressable>
+
+            <Pressable style={styles.moreOptions} onPress={() => setMoreOptions((value) => !value)} testID="new-project-more-options">
+              <Text style={styles.moreOptionsText}>{moreOptions ? t('fewer_options') : t('more_options')}</Text>
+              <Ionicons name={moreOptions ? 'chevron-up' : 'chevron-down'} size={18} color={theme.color.onSurface2} />
+            </Pressable>
+            {moreOptions && <View style={styles.advanced}>
+              <Text style={styles.label}>{t('type_of_shoot')}</Text>
+              <View style={styles.chipRow}>
+                {types.map((id) => chip(shootType === id, label(id, t), () => { setChoicesTouched(true); setShootType(id); }, `chip-shoot-${id}`))}
+                <Pressable onPress={() => setCustomOpen(true)} style={[styles.chip, styles.chipAdd]} testID="chip-shoot-add-custom">
+                  <Ionicons name="add" size={16} color={theme.color.brand} />
+                  <Text style={[styles.chipText, { color: theme.color.brand, marginLeft: 4 }]}>{t('custom')}</Text>
+                </Pressable>
+              </View>
+              <Text style={styles.label}>{t('style_label')}</Text>
+              <View style={styles.chipRow}>
+                {STYLES.map((value) => chip(style === value, t(`style_${value}`), () => { setChoicesTouched(true); setStyle(value); }, `chip-style-${value}`))}
+              </View>
+              <Text style={styles.label}>{t('mood')}</Text>
+              <View style={styles.chipRow}>
+                {MOODS.map((m) => chip(mood === m, t(`mood_${m.toLowerCase()}`), () => { setChoicesTouched(true); setMood(m); }, `chip-mood-${m}`))}
+              </View>
+              <Text style={styles.label}>{t('duration')}</Text>
+              <View style={styles.chipRow}>
+                {DURATIONS.map((d) => chip(duration === d, `${d}s`, () => { setChoicesTouched(true); setDuration(d); }, `chip-dur-${d}`))}
+              </View>
+              <Text style={styles.label}>{t('platform')}</Text>
+              <View style={styles.chipRow}>
+                {PLATFORMS.map((p) => chip(platform === p.id, p.label, () => { setChoicesTouched(true); setPlatform(p.id); }, `chip-plat-${p.id}`))}
+              </View>
+              <Text style={styles.label}>{t('target_audience')}</Text>
+              <View style={styles.input}>
+                <TextInput value={audience} onChangeText={setAudience} placeholder={t('audience_example')}
+                  placeholderTextColor={theme.color.onSurface3} style={styles.text} testID="new-project-audience" />
+              </View>
+            </View>}
 
             <Pressable
               style={[styles.primary, (!canSubmit || busy) && { opacity: 0.5 }]}
@@ -222,6 +294,13 @@ const styles = StyleSheet.create({
   purposeText: { minHeight: 112, paddingVertical: 12 },
   helper: { color: theme.color.onSurface3, fontSize: 12, lineHeight: 17, marginTop: 7 },
   text: { color: theme.color.onSurface, fontSize: 16 },
+  myStyle: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, marginTop: 18, borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border },
+  myStyleOn: { borderColor: theme.color.brand, backgroundColor: theme.color.brandTint },
+  myStyleTitle: { color: theme.color.onSurface, fontSize: 14, fontWeight: '700' },
+  myStyleHint: { color: theme.color.onSurface3, fontSize: 12, lineHeight: 17, marginTop: 3 },
+  moreOptions: { minHeight: 48, marginTop: 10, paddingHorizontal: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  moreOptionsText: { color: theme.color.onSurface2, fontWeight: '700', fontSize: 14 },
+  advanced: { paddingBottom: 8 },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: {
     paddingHorizontal: 14, height: 36, borderRadius: theme.radius.pill,

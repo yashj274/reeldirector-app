@@ -10,7 +10,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 
-import { api } from '@/src/api';
+import { api, DirectorGuidance } from '@/src/api';
+import { logBeta } from '@/src/betaLog';
 import { theme } from '@/src/theme';
 import { ClipVideoPreview } from '@/src/ClipVideoPreview';
 import { MovementGuide } from '@/src/MovementGuide';
@@ -158,7 +159,7 @@ export default function DirectorCamera() {
   const [project, setProject] = useState<any>(null);
   const [shotIndex, setShotIndex] = useState<number>(shot ? parseInt(shot) : 0);
   const shotIndexRef = useRef(shot ? parseInt(shot) : 0);
-  const [instruction, setInstruction] = useState<{ text: string; arrow: string; ready: boolean } | null>(null);
+  const [instruction, setInstruction] = useState<DirectorGuidance | null>(null);
   const [recording, setRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
   const [analyzing, setAnalyzing] = useState(false);
@@ -393,10 +394,10 @@ export default function DirectorCamera() {
     try {
       const imageBase64 = await captureFrame();
       const r = await api.director(id, shotIndex, imageBase64);
-      setInstruction({ text: r.instruction, arrow: r.arrow_direction, ready: r.ready });
+      setInstruction(r);
       setCameraError(null);
     } catch (e: any) {
-      setInstruction({ text: shotObj.direction?.slice(0, 40) || 'Hold steady', arrow: 'none', ready: false });
+      setInstruction({ command: 'hold_steady', message: shotObj.direction?.slice(0, 40) || 'Hold steady', confidence: 0, ready: false });
       if (e.message?.includes('not configured') || e.message?.includes('not connected')) setCameraError(e.message);
     } finally {
       directionPending.current = false;
@@ -444,6 +445,7 @@ export default function DirectorCamera() {
 
   const startTimer = () => {
     clipStart.current = Date.now();
+    logBeta('recording', 'started');
     setRecording(true);
     setRecSeconds(0);
     recTimer.current = setInterval(() => {
@@ -568,6 +570,7 @@ export default function DirectorCamera() {
   const stopRec = async () => {
     if (stoppingRecording.current || !recordingPromise.current) return;
     stoppingRecording.current = true;
+    let captured = false;
     if (recTimer.current) { clearInterval(recTimer.current); recTimer.current = null; }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     setAnalyzing(true);
@@ -581,6 +584,8 @@ export default function DirectorCamera() {
       }
       const recorded = await recordingPromise.current;
       if (!recorded?.uri && !recorded?.blob) throw new Error('The camera did not return a video file.');
+      captured = true;
+      logBeta('recording', 'completed');
       const dur = Math.max(0.1, (Date.now() - clipStart.current) / 1000);
       const frameBase64 = await captureFrame();
       if (id) {
@@ -603,6 +608,7 @@ export default function DirectorCamera() {
         setQuality((current: any) => current?.review_pending === false ? current : q);
       }
     } catch (e) {
+      if (!captured) logBeta('recording', 'failed');
       console.warn('Recording or upload failed:', e);
       setCameraError(e instanceof Error ? e.message : 'Could not save this clip. Please try again.');
     } finally {
@@ -701,15 +707,15 @@ export default function DirectorCamera() {
 
   const arrowIcon = (a: string) => {
     switch (a) {
-      case 'up': return 'arrow-up';
-      case 'down': return 'arrow-down';
-      case 'left': return 'arrow-back';
-      case 'right': return 'arrow-forward';
-      case 'forward': return 'arrow-up-circle';
-      case 'back': return 'arrow-down-circle';
-      case 'rotate_cw':
-      case 'rotate_ccw': return 'refresh';
-      case 'none': return 'pause-circle-outline';
+      case 'up': case 'tilt_up': return 'arrow-up';
+      case 'down': case 'tilt_down': return 'arrow-down';
+      case 'left': case 'move_left': return 'arrow-back';
+      case 'right': case 'move_right': return 'arrow-forward';
+      case 'forward': case 'move_forward': return 'arrow-up-circle';
+      case 'back': case 'move_backward': return 'arrow-down-circle';
+      case 'rotate_cw': case 'rotate_ccw': return 'refresh';
+      case 'ready_to_record': return 'checkmark-circle';
+      case 'hold_steady': return 'pause-circle-outline';
       default: return 'hand-left-outline';
     }
   };
@@ -809,12 +815,12 @@ export default function DirectorCamera() {
             <BlurView tint="dark" intensity={50} style={StyleSheet.absoluteFill} />
             {directionBusy ? <ActivityIndicator color={theme.color.brand} /> : (
               <Ionicons
-                name={instruction?.ready ? 'checkmark-circle' : arrowIcon(movementArrow(shotObj?.camera_movement)) as any}
+                name={instruction?.ready ? 'checkmark-circle' : arrowIcon(instruction?.command || movementArrow(shotObj?.camera_movement)) as any}
                 size={26}
                 color={instruction?.ready ? theme.color.success : theme.color.brand}
               />
             )}
-            <Text style={styles.instrText} numberOfLines={2}>{instruction?.ready && instruction.text ? instruction.text : shotInstruction}</Text>
+            <Text style={styles.instrText} numberOfLines={2}>{instruction?.message || shotInstruction}</Text>
             <Pressable onPress={requestDirection} disabled={directionBusy || recording} testID="camera-refresh-direction">
               <Ionicons name="refresh" size={20} color={directionBusy ? theme.color.onSurface3 : '#fff'} />
             </Pressable>

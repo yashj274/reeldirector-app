@@ -5,6 +5,7 @@ import { Platform } from 'react-native';
 import { decode } from 'base64-arraybuffer';
 import { getSupabase, hasSupabaseConfig } from '@/src/supabase';
 import { getLanguage } from '@/src/i18n';
+import { logBeta } from '@/src/betaLog';
 
 const configuredBackend = (Constants.expoConfig?.extra?.backendUrl || '').replace(/\/+$/, '');
 function getBackendBase() {
@@ -30,14 +31,39 @@ const BASE = getBackendBase();
 const TOKEN_KEY = 'reeldirector.token';
 const USER_KEY = 'reeldirector.user';
 const CREATOR_SKILL_KEY = 'reeldirector.creatorSkill';
+const CREATOR_STYLE_KEY = 'reeldirector.creatorStyleProfile';
 const PROJECT_CACHE_PREFIX = 'reeldirector.project.';
 const PROJECT_INDEX_PREFIX = 'reeldirector.projects.';
 const PENDING_CREATE_PREFIX = 'reeldirector.project-create.';
 const BACKEND_WARM_KEY = 'reeldirector.backend.lastHealthy';
 const MAX_CACHED_PROJECTS = 10;
 export type CreatorSkillLevel = 'beginner' | 'creator' | 'pro';
+export type CreatorStyle = 'cinematic' | 'fast_pace' | 'minimal' | 'editorial' | 'luxury' | 'action';
+export type CreatorStyleMood = 'Cinematic' | 'Emotional' | 'Energetic' | 'Luxury' | 'Minimal' | 'Warm';
+export type CreatorStyleProfile = {
+  style: CreatorStyle;
+  mood: CreatorStyleMood;
+  duration_seconds: number;
+  category: string;
+  goal: string;
+  pacing: string;
+  text_amount: string;
+  movements: string[];
+  project_count: number;
+  has_preferences: boolean;
+};
+type StyleSnapshot = Partial<Omit<CreatorStyleProfile, 'project_count'>> & { project_id: string };
+type CreatorStyleRecord = { preferences: Partial<Pick<CreatorStyleProfile, 'style' | 'mood' | 'duration_seconds'>>; recent: StyleSnapshot[]; total: number };
 const isCreatorSkillLevel = (value: unknown): value is CreatorSkillLevel =>
   value === 'beginner' || value === 'creator' || value === 'pro';
+const CREATOR_STYLES: CreatorStyle[] = ['cinematic', 'fast_pace', 'minimal', 'editorial', 'luxury', 'action'];
+const CREATOR_MOODS: CreatorStyleMood[] = ['Cinematic', 'Emotional', 'Energetic', 'Luxury', 'Minimal', 'Warm'];
+const CREATOR_DURATIONS = [15, 20, 30, 45, 60];
+const CREATOR_CATEGORIES = ['wedding', 'travel', 'food', 'fashion', 'gym', 'product', 'real_estate', 'cafe', 'restaurant', 'event', 'documentary', 'business', 'lifestyle', 'daily_vlog', 'social_media', 'cinematic', 'other'];
+const CREATOR_GOALS = ['storytelling', 'showcase', 'sales', 'education', 'entertainment', 'memory', 'brand_awareness'];
+const CREATOR_PACING = ['relaxed', 'balanced', 'fast'];
+const CREATOR_TEXT_AMOUNT = ['minimal', 'some', 'more'];
+const CREATOR_MOVEMENTS = ['static', 'pan_left', 'pan_right', 'tilt_up', 'tilt_down', 'dolly_in', 'dolly_out', 'tracking', 'orbit', 'reveal', 'handheld'];
 const SIGNED_URL_CACHE_TTL_MS = 50 * 60 * 1000;
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
 let backendHealthyAt = 0;
@@ -187,6 +213,178 @@ export async function setCreatorSkillLevel(level: CreatorSkillLevel): Promise<vo
   if (data.session) {
     const result = await getSupabase().auth.updateUser({ data: { creator_skill_level: level } });
     if (result.error) throw result.error;
+  }
+}
+
+function cleanStyleRecord(value: any): CreatorStyleRecord {
+  const rawPreferences = value?.preferences || {};
+  const preferences: CreatorStyleRecord['preferences'] = {};
+  if (CREATOR_STYLES.includes(rawPreferences.style)) preferences.style = rawPreferences.style;
+  if (CREATOR_MOODS.includes(rawPreferences.mood)) preferences.mood = rawPreferences.mood;
+  if (CREATOR_DURATIONS.includes(rawPreferences.duration_seconds)) preferences.duration_seconds = rawPreferences.duration_seconds;
+  const recent = Array.isArray(value?.recent) ? value.recent.filter((item: any) => item && typeof item.project_id === 'string').slice(-12).map((item: any) => {
+    const clean: StyleSnapshot = { project_id: item.project_id.slice(0, 64) };
+    for (const field of ['style', 'mood', 'category', 'goal', 'pacing', 'text_amount'] as const) {
+      const allowed = field === 'style' ? CREATOR_STYLES : field === 'mood' ? CREATOR_MOODS
+        : field === 'category' ? CREATOR_CATEGORIES : field === 'goal' ? CREATOR_GOALS
+          : field === 'pacing' ? CREATOR_PACING : CREATOR_TEXT_AMOUNT;
+      if (allowed.includes(item[field])) (clean as any)[field] = item[field];
+    }
+    if (CREATOR_DURATIONS.includes(item.duration_seconds)) clean.duration_seconds = item.duration_seconds;
+    clean.movements = Array.isArray(item.movements) ? item.movements.filter((movement: unknown) => CREATOR_MOVEMENTS.includes(movement as string)).slice(0, 6) : [];
+    return clean;
+  }) : [];
+  return { preferences, recent, total: Math.max(recent.length, Number(value?.total) || 0) };
+}
+
+function creatorStyleStorageKey(userId?: string) {
+  return userId ? `${CREATOR_STYLE_KEY}.${userId}` : CREATOR_STYLE_KEY;
+}
+
+async function readCreatorStyleRecord(): Promise<CreatorStyleRecord> {
+  let userId: string | undefined;
+  let saved: any;
+  try {
+    if (hasSupabaseConfig()) {
+      const { data, error } = await getSupabase().auth.getSession();
+      if (!error && data.session) {
+        userId = data.session.user.id;
+        saved = data.session.user.user_metadata?.creator_style_profile;
+      }
+    }
+  } catch { /* Keep the device copy available offline. */ }
+  let local: CreatorStyleRecord = { preferences: {}, recent: [], total: 0 };
+  try { local = cleanStyleRecord(JSON.parse(await AsyncStorage.getItem(creatorStyleStorageKey(userId)) || 'null')); } catch { /* Use an empty profile if local data is unavailable. */ }
+  if (saved) {
+    const remote = cleanStyleRecord(saved);
+    void AsyncStorage.setItem(creatorStyleStorageKey(userId), JSON.stringify(remote)).catch(() => {});
+    return remote;
+  }
+  return local;
+}
+
+async function writeCreatorStyleRecord(record: CreatorStyleRecord): Promise<void> {
+  const clean = cleanStyleRecord(record);
+  let userId: string | undefined;
+  if (hasSupabaseConfig()) {
+    const { data, error } = await getSupabase().auth.getSession();
+    if (error) throw error;
+    userId = data.session?.user.id;
+    if (data.session) {
+      const result = await getSupabase().auth.updateUser({ data: { creator_style_profile: clean } });
+      if (result.error) throw result.error;
+    }
+  }
+  await AsyncStorage.setItem(creatorStyleStorageKey(userId), JSON.stringify(clean));
+}
+
+function mostUsed<T extends string | number>(recent: StyleSnapshot[], field: keyof Omit<StyleSnapshot, 'project_id' | 'movements'>, fallback: T): T {
+  const counts = new Map<string | number, number>();
+  for (const entry of recent) {
+    const value = entry[field];
+    if (typeof value === 'string' || typeof value === 'number') counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  return ([...counts].sort((a, b) => b[1] - a[1])[0]?.[0] as T | undefined) ?? fallback;
+}
+
+export async function getCreatorStyleProfile(): Promise<CreatorStyleProfile> {
+  const record = await readCreatorStyleRecord();
+  const { preferences, recent } = record;
+  const movementCounts = new Map<string, number>();
+  recent.forEach((entry) => entry.movements?.forEach((movement) => movementCounts.set(movement, (movementCounts.get(movement) || 0) + 1)));
+  const movements = [...movementCounts].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([movement]) => movement);
+  return {
+    style: preferences.style || mostUsed(recent, 'style', 'cinematic'),
+    mood: preferences.mood || mostUsed(recent, 'mood', 'Cinematic'),
+    duration_seconds: preferences.duration_seconds || mostUsed(recent, 'duration_seconds', 30),
+    category: mostUsed(recent, 'category', 'social_media'),
+    goal: mostUsed(recent, 'goal', 'storytelling'),
+    pacing: mostUsed(recent, 'pacing', 'balanced'),
+    text_amount: mostUsed(recent, 'text_amount', 'minimal'),
+    movements,
+    project_count: record.total,
+    has_preferences: Object.keys(preferences).length > 0,
+  };
+}
+
+export async function saveCreatorStylePreferences(preferences: Partial<Pick<CreatorStyleProfile, 'style' | 'mood' | 'duration_seconds'>>) {
+  const record = await readCreatorStyleRecord();
+  const next = cleanStyleRecord({ ...record, preferences: { ...record.preferences, ...preferences } });
+  await writeCreatorStyleRecord(next);
+  return getCreatorStyleProfile();
+}
+
+export async function resetCreatorStyleProfile() {
+  let userId: string | undefined;
+  if (hasSupabaseConfig()) {
+    const { data, error } = await getSupabase().auth.getSession();
+    if (error) throw error;
+    userId = data.session?.user.id;
+    if (data.session) {
+      const result = await getSupabase().auth.updateUser({ data: { creator_style_profile: null } });
+      if (result.error) throw result.error;
+    }
+  }
+  await AsyncStorage.removeItem(creatorStyleStorageKey(userId));
+}
+
+function styleSnapshot(project: any): StyleSnapshot {
+  const purpose = String(project?.purpose || '').toLowerCase();
+  const goal = /sell|sale|order|shop|book|buy|launch/.test(purpose) ? 'sales'
+    : /teach|learn|how to|tutorial|explain|guide/.test(purpose) ? 'education'
+      : /brand|business|company|promote/.test(purpose) ? 'brand_awareness'
+        : /remember|memory|anniversary|wedding|birthday|family/.test(purpose) ? 'memory'
+          : /funny|entertain|viral|trend/.test(purpose) ? 'entertainment'
+            : /show|feature|product|portfolio/.test(purpose) ? 'showcase' : 'storytelling';
+  const shots = Array.isArray(project?.storyboard) ? project.storyboard : [];
+  const averageShot = shots.length ? Number(project?.duration_seconds || 30) / shots.length : 4;
+  const edit = project?.edit_settings || {};
+  const captions = !!edit.captions_enabled;
+  const titleText = String(edit.title_text || '').trim().length > 0;
+  const rawDuration = Number(project?.duration_seconds) || 30;
+  const duration = CREATOR_DURATIONS.reduce((best, value) => Math.abs(value - rawDuration) < Math.abs(best - rawDuration) ? value : best, 30);
+  const movementNames = new Set<string>();
+  shots.forEach((shot: any) => {
+    const movement = String(shot?.camera_movement || '').toLowerCase().replace(/[\s-]+/g, '_');
+    if (CREATOR_MOVEMENTS.includes(movement)) movementNames.add(movement);
+  });
+  return {
+    project_id: String(project?.id || '').slice(0, 64),
+    style: CREATOR_STYLES.includes(project?.style) ? project.style : 'cinematic',
+    mood: CREATOR_MOODS.includes(project?.mood) ? project.mood : 'Cinematic',
+    duration_seconds: duration,
+    category: CREATOR_CATEGORIES.includes(project?.shoot_type) ? project.shoot_type : 'other',
+    goal,
+    pacing: averageShot <= 3 ? 'fast' : averageShot >= 6 ? 'relaxed' : 'balanced',
+    text_amount: captions && titleText ? 'more' : captions || titleText ? 'some' : 'minimal',
+    movements: [...movementNames].slice(0, 6),
+  };
+}
+
+async function rememberCreatorStyleChoice(project: any) {
+  if (!project?.id) return;
+  try {
+    const record = await readCreatorStyleRecord();
+    const snapshot = styleSnapshot(project);
+    const existed = record.recent.some((entry) => entry.project_id === snapshot.project_id);
+    const recent = [...record.recent.filter((entry) => entry.project_id !== snapshot.project_id), snapshot].slice(-12);
+    await writeCreatorStyleRecord({ ...record, recent, total: record.total + (existed ? 0 : 1) });
+  } catch { /* Style learning is optional; project work must continue offline. */ }
+}
+
+export type DirectorCommand = 'move_left' | 'move_right' | 'move_forward' | 'move_backward' | 'tilt_up' | 'tilt_down' | 'hold_steady' | 'subject_left' | 'subject_right' | 'improve_lighting' | 'ready_to_record' | 'start_recording' | 'stop_recording';
+export type DirectorGuidance = { command: DirectorCommand; message: string; ready: boolean; confidence: number };
+
+function directorCommand(raw: any): DirectorCommand {
+  if (raw?.ready) return 'ready_to_record';
+  switch (raw?.arrow_direction) {
+    case 'left': return 'move_left';
+    case 'right': return 'move_right';
+    case 'forward': return 'move_forward';
+    case 'back': return 'move_backward';
+    case 'up': return 'tilt_up';
+    case 'down': return 'tilt_down';
+    default: return 'hold_steady';
   }
 }
 
@@ -447,10 +645,12 @@ async function createProjectOnce(payload: any) {
     if (!existing?.data) throw friendlyServiceError(error);
     await AsyncStorage.removeItem(pendingKey).catch(() => {});
     await rememberProject(user.id, existing.data, existing.updated_at || null);
+    void rememberCreatorStyleChoice(existing.data);
     return existing.data;
   }
   await AsyncStorage.removeItem(pendingKey).catch(() => {});
   await rememberProject(user.id, project, now);
+  void rememberCreatorStyleChoice(project);
   return project;
 }
 
@@ -473,18 +673,21 @@ async function saveAudioTrack(
   const storagePath = `${user.id}/${projectId}/audio/${stamp}-${safeName}`;
   const { File } = await import('expo-file-system');
   const bytes = file.file ? await file.file.arrayBuffer() : await new File(file.uri).arrayBuffer();
+  logBeta('upload', 'started');
   const { error } = await getSupabase().storage.from('project-media').upload(storagePath, bytes, {
     contentType: file.mimeType || 'audio/mpeg', upsert: false,
   });
-  if (error) throw error;
+  if (error) { logBeta('upload', 'failed'); throw error; }
   const oldPath = project[track]?.storage_path;
   const audioTrack = { storage_path: storagePath, title: file.name, content_type: file.mimeType || 'audio/mpeg' };
   try {
     await updateProjectData({ ...project, [track]: audioTrack, updated_at: new Date().toISOString() });
   } catch (updateError) {
+    logBeta('upload', 'failed');
     if (!(updateError as any)?.localSaved) await deleteStoredFrames([storagePath]);
     throw updateError;
   }
+  logBeta('upload', 'completed');
   if (oldPath) await deleteStoredFrames([oldPath]);
   return { ...audioTrack, signed_url: (await readProject(projectId))[track]?.signed_url };
 }
@@ -579,7 +782,9 @@ export const api = {
   getProject: readProject,
   saveEditSettings: async (id: string, settings: Record<string, any>) => {
     const project = await readProject(id);
-    await updateProjectData({ ...project, edit_settings: settings, updated_at: new Date().toISOString() });
+    const updated = { ...project, edit_settings: settings, updated_at: new Date().toISOString() };
+    await updateProjectData(updated);
+    void rememberCreatorStyleChoice(updated);
     return { ok: true };
   },
   deleteProject: async (id: string) => {
@@ -612,17 +817,55 @@ export const api = {
         preserved_existing: true, cached: true,
       };
     }
-    return request(`/projects/${id}/storyboard`, {
-      method: 'POST', body: JSON.stringify({ language: await getLanguage() }),
-    });
+    logBeta('storyboard', 'started');
+    logBeta('ai_request', 'started');
+    try {
+      const result = await request(`/projects/${id}/storyboard`, {
+        method: 'POST', body: JSON.stringify({ language: await getLanguage() }),
+      });
+      logBeta('storyboard', 'completed');
+      logBeta('ai_request', 'completed');
+      const project = await readProject(id).catch(() => null);
+      if (project) void rememberCreatorStyleChoice({ ...project, storyboard: result?.storyboard || project.storyboard });
+      return result;
+    } catch (error) {
+      logBeta('storyboard', 'failed');
+      logBeta('ai_request', 'failed');
+      throw error;
+    }
   },
-  scan: async (project_id: string, image_base64: string, frames: string[] = []) => request('/scan', {
-    method: 'POST', body: JSON.stringify({ project_id, frames: frames.length ? frames : [image_base64], language: await getLanguage() }),
-  }),
-  director: async (project_id: string, shot_index: number, image_base64?: string) =>
-    request('/director/instruct', {
-      method: 'POST', body: JSON.stringify({ project_id, shot_index, image_base64, language: await getLanguage() }),
-    }),
+  scan: async (project_id: string, image_base64: string, frames: string[] = []) => {
+    logBeta('scan', 'started');
+    logBeta('ai_request', 'started');
+    try {
+      const result = await request('/scan', {
+        method: 'POST', body: JSON.stringify({ project_id, frames: frames.length ? frames : [image_base64], language: await getLanguage() }),
+      });
+      logBeta('scan', 'completed');
+      logBeta('ai_request', 'completed');
+      return result;
+    } catch (error) {
+      logBeta('scan', 'failed');
+      logBeta('ai_request', 'failed');
+      throw error;
+    }
+  },
+  director: async (project_id: string, shot_index: number, image_base64?: string): Promise<DirectorGuidance> => {
+    logBeta('ai_request', 'started');
+    try {
+      const raw = await request('/director/instruct', {
+        method: 'POST', body: JSON.stringify({ project_id, shot_index, image_base64, language: await getLanguage() }),
+      });
+      logBeta('ai_request', 'completed');
+      return {
+        command: directorCommand(raw), message: String(raw?.instruction || 'Hold camera steady'),
+        ready: !!raw?.ready, confidence: Math.max(0, Math.min(100, Number(raw?.confidence) || 0)),
+      };
+    } catch (error) {
+      logBeta('ai_request', 'failed');
+      throw error;
+    }
+  },
   clipQuality: async (
     project_id: string,
     shot_index: number,
@@ -644,6 +887,7 @@ export const api = {
     const extension = mimeType === 'video/webm' ? 'webm' : mimeType === 'video/quicktime' ? 'mov' : 'mp4';
     const video_storage_path = `${prefix}/${stamp}.${extension}`;
     const uploaded: string[] = [];
+    logBeta('upload', 'started');
     try {
       const storage = getSupabase().storage.from('project-media');
       const videoBytes = video.blob
@@ -682,14 +926,17 @@ export const api = {
       if (storyboard[shot_index]) storyboard[shot_index].status = 'captured';
       const savedProject = { ...project, clips, storyboard, status: 'shooting' };
       await updateProjectData(savedProject);
+      logBeta('upload', 'completed');
       void deleteStoredFrames(replacedClips.flatMap((item: any) => [item.frame_storage_path, item.video_storage_path]).filter(Boolean));
       onSaved?.(savedProject);
 
       // Let the creator move to the next shot while Gemini reviews this frame.
+      logBeta('ai_request', 'started');
       void request('/clips/quality', {
           method: 'POST',
           body: JSON.stringify({ project_id, shot_index, frame_base64, duration_seconds, brightness, language, frame_storage_path, video_storage_path }),
         }).then(async (quality) => {
+          logBeta('ai_request', 'completed');
           const latest = await readProject(project_id);
           const current = (latest.clips || []).find((item: any) => item.clip_id === stamp);
           if (!current) return;
@@ -700,6 +947,7 @@ export const api = {
           await updateProjectData(latest);
           onReview?.({ ...quality, review_pending: false });
         }).catch((error) => {
+          logBeta('ai_request', 'failed');
           console.warn('Background clip review failed:', error);
           const unavailable = { ...pendingQuality, review_pending: false, reason: 'Clip saved. Automatic review is unavailable right now.' };
           void readProject(project_id).then(async (latest) => {
@@ -712,6 +960,7 @@ export const api = {
         });
       return pendingQuality;
     } catch (error) {
+      logBeta('upload', 'failed');
       if (!(error as any)?.localSaved) await deleteStoredFrames(uploaded);
       throw error;
     }
@@ -728,7 +977,9 @@ export const api = {
       shots[i].index = i;
       shots[i].status ??= 'pending';
     }
-    await updateProjectData({ ...project, storyboard: shots, storyboard_user_edited: true, updated_at: new Date().toISOString() });
+    const updated = { ...project, storyboard: shots, storyboard_user_edited: true, updated_at: new Date().toISOString() };
+    await updateProjectData(updated);
+    void rememberCreatorStyleChoice(updated);
     return { storyboard: shots };
   },
   regenerateShot: async (id: string, shot_index: number, notes?: string) => request(`/projects/${id}/storyboard/regenerate`, {
@@ -779,11 +1030,21 @@ export const api = {
     if (typeof exportOptions.original_volume === 'number' && exportOptions.original_volume > 1) {
       exportOptions.original_volume /= 100;
     }
-    await warmBackend();
-    const result = await request(`/projects/${id}/export`, {
-      method: 'POST', body: JSON.stringify(exportOptions),
-    });
-    onProgress?.('completed');
-    return result;
+    logBeta('render', 'started');
+    logBeta('export', 'started');
+    try {
+      await warmBackend();
+      const result = await request(`/projects/${id}/export`, {
+        method: 'POST', body: JSON.stringify(exportOptions),
+      });
+      logBeta('render', 'completed');
+      logBeta('export', 'completed');
+      onProgress?.('completed');
+      return result;
+    } catch (error) {
+      logBeta('render', 'failed');
+      logBeta('export', 'failed');
+      throw error;
+    }
   },
 };

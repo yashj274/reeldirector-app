@@ -204,7 +204,76 @@ async def current_user(authorization: Optional[str] = Header(None)) -> Dict[str,
         "name": metadata.get("name") or metadata.get("full_name") or "Director",
         "plan": metadata.get("plan", "free"),
         "creator_skill_level": skill_level if skill_level in {"beginner", "creator", "pro"} else "beginner",
+        "creator_style_profile": sanitize_creator_style_profile(metadata.get("creator_style_profile")),
     }
+
+def sanitize_creator_style_profile(value: Any) -> Dict[str, Any]:
+    styles = {"cinematic", "fast_pace", "minimal", "editorial", "luxury", "action"}
+    moods = {"Cinematic", "Emotional", "Energetic", "Luxury", "Minimal", "Warm"}
+    categories = {"wedding", "travel", "food", "fashion", "gym", "product", "real_estate", "cafe", "restaurant", "event", "documentary", "business", "lifestyle", "daily_vlog", "social_media", "cinematic", "other"}
+    goals = {"storytelling", "showcase", "sales", "education", "entertainment", "memory", "brand_awareness"}
+    paces = {"relaxed", "balanced", "fast"}
+    text_amounts = {"minimal", "some", "more"}
+    movements = {"static", "pan_left", "pan_right", "tilt_up", "tilt_down", "dolly_in", "dolly_out", "tracking", "orbit", "reveal", "handheld"}
+    if not isinstance(value, dict):
+        return {}
+    preferences = value.get("preferences") if isinstance(value.get("preferences"), dict) else {}
+    recent = value.get("recent") if isinstance(value.get("recent"), list) else []
+    recent = [item for item in recent[-12:] if isinstance(item, dict)]
+
+    def common(field: str, allowed: set, fallback: Any) -> Any:
+        counts: Dict[Any, int] = {}
+        for item in recent:
+            candidate = item.get(field)
+            if isinstance(candidate, (str, int)) and candidate in allowed:
+                counts[candidate] = counts.get(candidate, 0) + 1
+        return max(counts, key=counts.get) if counts else fallback
+
+    raw_style = preferences.get("style")
+    raw_mood = preferences.get("mood")
+    style = raw_style if isinstance(raw_style, str) and raw_style in styles else common("style", styles, "cinematic")
+    mood = raw_mood if isinstance(raw_mood, str) and raw_mood in moods else common("mood", moods, "Cinematic")
+    raw_duration = preferences.get("duration_seconds")
+    duration = raw_duration if isinstance(raw_duration, int) and raw_duration in {15, 20, 30, 45, 60} else common("duration_seconds", {15, 20, 30, 45, 60}, 30)
+    movement_counts: Dict[str, int] = {}
+    for item in recent:
+        for movement in item.get("movements", []) if isinstance(item.get("movements"), list) else []:
+            if isinstance(movement, str) and movement in movements:
+                movement_counts[movement] = movement_counts.get(movement, 0) + 1
+    learned_movements = sorted(movement_counts, key=movement_counts.get, reverse=True)[:3]
+    try:
+        total = max(0, min(10000, int(value.get("total", 0) or 0)))
+    except (TypeError, ValueError):
+        total = 0
+    return {
+        "style": style,
+        "mood": mood,
+        "duration_seconds": duration,
+        "category": common("category", categories, "social_media"),
+        "goal": common("goal", goals, "storytelling"),
+        "pacing": common("pacing", paces, "balanced"),
+        "text_amount": common("text_amount", text_amounts, "minimal"),
+        "movements": learned_movements,
+        "project_count": max(len(recent), total),
+        "has_preferences": (isinstance(raw_style, str) and raw_style in styles)
+            or (isinstance(raw_mood, str) and raw_mood in moods)
+            or (isinstance(raw_duration, int) and raw_duration in {15, 20, 30, 45, 60}),
+        "has_history": bool(recent),
+    }
+
+def creator_style_prompt(profile: Dict[str, Any]) -> str:
+    if not profile or not profile.get("has_preferences") and not profile.get("has_history"):
+        return ""
+    details = []
+    if profile.get("has_preferences"):
+        details.append(f"preferred style {profile.get('style')}, mood {profile.get('mood')}, and usual length {profile.get('duration_seconds')} seconds")
+    if profile.get("has_history"):
+        movement_list = ", ".join(profile.get("movements", [])) or "simple, steady camera moves"
+        details.append(
+            f"usual category {profile.get('category')}, goal {profile.get('goal')}, pace {profile.get('pacing')}, "
+            f"on-screen text {profile.get('text_amount')}, and familiar camera movements {movement_list}"
+        )
+    return "Creator style profile: " + "; ".join(details) + "."
 
 async def fetch_project(pid: str, user_id: str) -> Optional[Dict[str, Any]]:
     result = await get_supabase().table("projects").select("data").eq(
@@ -799,6 +868,19 @@ UI_TRANSLATION_SOURCE = {
     "try_again": "Try again", "sign_in_again": "Sign in again", "no_projects": "No projects yet. Tap + to create one.",
     "profile": "Profile", "preferences": "Preferences", "account": "Account", "support": "Support",
     "creator_skill_level": "How much filming experience do you have?",
+    "my_creator_style": "My creator style", "creator_style_help": "Your choices and recent reels help personalize new shot plans.",
+    "preferred_duration": "Usual reel length", "reset_style_profile": "Reset style profile",
+    "reset_style_confirm": "Clear learned choices and return to the default style?", "reset": "Reset",
+    "creator_style_learned": "Learned from {count} reels: {category}, {goal}, {pacing} pace, {text} on-screen text. Familiar moves: {movements}.",
+    "creator_style_empty": "Your style will learn from reels you create. You can set a look and length now.", "not_enough_data": "still learning",
+    "create_in_my_style": "Create in My Style", "create_in_my_style_help": "Use your saved look and choices for this reel.",
+    "more_options": "More options", "fewer_options": "Fewer options",
+    "style_cinematic": "Cinematic", "style_fast_pace": "Fast paced", "style_minimal": "Clean",
+    "style_editorial": "Editorial", "style_luxury": "Luxury", "style_action": "Action",
+    "goal_storytelling": "storytelling", "goal_showcase": "showcase", "goal_sales": "sales",
+    "goal_education": "education", "goal_entertainment": "entertainment", "goal_memory": "memories",
+    "goal_brand_awareness": "brand building", "pacing_relaxed": "relaxed", "pacing_balanced": "balanced",
+    "pacing_fast": "fast", "text_amount_minimal": "minimal", "text_amount_some": "some", "text_amount_more": "more",
     "skill_help": "You can change this anytime. Beginner is the default.",
     "beginner": "Beginner", "creator": "Creator", "pro": "Pro",
     "phase_hook": "Hook", "phase_detail": "Detail", "phase_action": "Action", "phase_hero": "Hero", "phase_cta": "Ending",
@@ -847,7 +929,7 @@ UI_TRANSLATION_SOURCE = {
     "shoot_type_real_estate": "Real estate", "shoot_type_cafe": "Cafe", "shoot_type_restaurant": "Restaurant",
     "shoot_type_event": "Event", "shoot_type_documentary": "Documentary", "shoot_type_business": "Business",
     "shoot_type_lifestyle": "Lifestyle", "shoot_type_daily_vlog": "Daily vlog", "shoot_type_social_media": "Social media",
-    "shoot_type_cinematic": "Cinematic", "mood_cinematic": "Cinematic", "mood_emotional": "Emotional",
+    "shoot_type_cinematic": "Cinematic", "shoot_type_other": "Other", "mood_cinematic": "Cinematic", "mood_emotional": "Emotional",
     "mood_energetic": "Energetic", "mood_luxury": "Luxury", "mood_minimal": "Minimal", "mood_warm": "Warm",
     "template_wedding": "Wedding Cinema", "template_travel": "Travel Vlog", "template_food": "Food Cinematic",
     "template_fashion": "Fashion Editorial", "template_gym": "Gym Motivation", "template_real_estate": "Real Estate",
@@ -1110,6 +1192,7 @@ async def generate_storyboard(pid: str, body: Optional[StoryboardRequest] = None
         if scene_map and scene_map.get("ai_generated", True)
         else "No reliable AI environment scan was available. Use the creator's description and title only."
     )
+    style_context = creator_style_prompt(user.get("creator_style_profile", {})) if doc.get("use_creator_style") else ""
     prompt = f"""Create a highly customized script and shot list in {language} for this video:
 Title: {doc['title']}
 Type: {doc['shoot_type']}
@@ -1121,10 +1204,11 @@ Target duration: {doc['duration_seconds']} seconds
 Audience: {doc['audience'] or 'general'}
 Selected language: {language}
 Creator skill level: {user.get('creator_skill_level', 'beginner')}
+{style_context}
 Environment scan: {scene_context}
 
 Use the title and creator's explanation as the source of truth. Notice cultural/event references and make the storytelling, shot ideas, props/details, and narration fit that occasion. Use the environment scan to choose subjects, backgrounds, lighting, and feasible framing; never claim a person or object is present unless the scan supports it. Return the complete structured storyboard with title, concept, style, goal, totalDuration, hook, cta, and 4 to 8 shots whose durations add up close to {doc['duration_seconds']} seconds.
-Make it practical to film on a phone and tailored to {doc['platform']}. Match the creator skill level in every short instruction."""
+Make it practical to film on a phone and tailored to {doc['platform']}. Match the creator skill level in every short instruction. Use the stored creator style only as a light preference when it fits this description and setting."""
 
     ai_generated = True
     script = ""
@@ -2001,6 +2085,7 @@ async def regen_shot(pid: str, body: RegenShotIn, user=Depends(current_user)):
     scan_context = doc.get("scene_map") or {}
     if scan_context.get("ai_generated") is False:
         scan_context = "No reliable AI environment scan was available. Use the creator's description and current shot only."
+    style_context = creator_style_prompt(user.get("creator_style_profile", {})) if doc.get("use_creator_style") else ""
     prompt = f"""Regenerate shot #{body.shot_index + 1} for project '{doc['title']}' ({doc['shoot_type']}, {doc['style']}).
 Creator's explanation: {doc.get('purpose') or 'not supplied'}
 Selected language: {language}
@@ -2008,6 +2093,7 @@ Environment scan: {json.dumps(scan_context, ensure_ascii=False)}
 Current shot: {json.dumps(existing)}
 User notes: {body.notes or 'make it more cinematic'}
 Creator skill level: {user.get('creator_skill_level', 'beginner')}
+{style_context}
 Return one shot object using the storyboard shot fields shotNumber, purpose, shotType, duration, cameraMovement, animationTemplate, subjectPosition, cameraStart, cameraEnd, instruction, voiceover, onScreenText, difficulty, title, and description. Keep the action instruction under 12 words and all written fields in {language}. Fit the project purpose and actual scanned environment."""
     try:
         raw = await chat_once("You are a culturally informed short-form video director. Return only one valid JSON shot object; do not include a storyboard wrapper or prose.", prompt)
