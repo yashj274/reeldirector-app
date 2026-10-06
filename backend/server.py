@@ -31,6 +31,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_SCAN_MODEL = os.environ.get("GEMINI_SCAN_MODEL", "gemini-3.5-flash-lite")
 FAL_KEY = os.environ.get("FAL_KEY", "")
 FAL_VIDEO_MODEL = "fal-ai/wan/v2.7/text-to-video"
 CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY", "")
@@ -82,7 +83,7 @@ class ProjectOut(BaseModel):
     updated_at: str
 
 class SceneScanIn(BaseModel):
-    image_base64: str  # jpeg base64 without header
+    image_base64: Optional[str] = None  # jpeg base64 without header; kept for older clients
     frames: Optional[List[str]] = None
     project_id: Optional[str] = None
     language: Optional[str] = None
@@ -441,7 +442,12 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
 
 
 # ---------------- Gemini API ----------------
-def _send_gemini_response(system: str, prompt: str, images: Optional[List[str]] = None) -> str:
+def _send_gemini_response(
+    system: str, prompt: str, images: Optional[List[str]] = None, *,
+    model: Optional[str] = None, max_output_tokens: int = 2048,
+    thinking_level: Optional[str] = None, max_attempts: int = 3,
+    timeout: tuple = (10, 45),
+) -> str:
     """Send a text and optional JPEG/base64 image prompt to Gemini."""
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not configured")
@@ -459,23 +465,26 @@ def _send_gemini_response(system: str, prompt: str, images: Optional[List[str]] 
                 mime_type = mime_match.group(1)
         parts.append({"inlineData": {"mimeType": mime_type, "data": image}})
 
-    request_url = GEMINI_GENERATE_CONTENT_URL.format(model=GEMINI_MODEL)
+    request_url = GEMINI_GENERATE_CONTENT_URL.format(model=model or GEMINI_MODEL)
     request_headers = {
         "x-goog-api-key": GEMINI_API_KEY,
         "Content-Type": "application/json",
     }
+    generation_config = {"maxOutputTokens": max_output_tokens}
+    if thinking_level:
+        generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
     request_body = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"maxOutputTokens": 2048},
+        "generationConfig": generation_config,
     }
     retryable_statuses = {408, 429, 500, 502, 503, 504}
-    max_attempts = 3
+    max_attempts = max(1, max_attempts)
     response = None
     for attempt in range(1, max_attempts + 1):
         try:
             response = requests.post(
-                request_url, headers=request_headers, json=request_body, timeout=(10, 45),
+                request_url, headers=request_headers, json=request_body, timeout=timeout,
             )
         except (requests.Timeout, requests.ConnectionError):
             if attempt == max_attempts:
@@ -514,9 +523,11 @@ def _send_gemini_response(system: str, prompt: str, images: Optional[List[str]] 
     return "".join(text_parts)
 
 
-async def chat_once(system: str, prompt: str, images: Optional[List[str]] = None) -> str:
+async def chat_once(
+    system: str, prompt: str, images: Optional[List[str]] = None, **options,
+) -> str:
     """Run the blocking HTTP client outside the async event loop."""
-    return await asyncio.to_thread(_send_gemini_response, system, prompt, images)
+    return await asyncio.to_thread(_send_gemini_response, system, prompt, images, **options)
 
 def extract_json(text: str) -> Any:
     """Pull the first JSON object/array from an LLM response."""
@@ -1086,9 +1097,15 @@ No prose. No markdown."""
 
 @api.post("/scan")
 async def scan_environment(body: SceneScanIn, user=Depends(current_user)):
-    if not body.image_base64:
+    frames = [frame for frame in (body.frames or []) if frame][:2]
+    if not frames and body.image_base64:
+        frames = [body.image_base64]
+    if not frames:
         raise HTTPException(400, "image_base64 required")
+    scan_started = time.perf_counter()
+    stage_started = scan_started
     doc = await fetch_project(body.project_id, user["id"]) if body.project_id else None
+    project_fetch_ms = round((time.perf_counter() - stage_started) * 1000)
     if body.project_id and not doc:
         raise HTTPException(404, "Project not found")
     selected_code = str(body.language or (doc or {}).get("language") or "en").lower()
@@ -1100,36 +1117,33 @@ Creator's explanation: {doc.get('purpose') or 'not supplied'}
 Shoot type: {doc.get('shoot_type') or 'general'}
 Keep event and cultural context in mind, but describe only visual evidence in the frame."""
     try:
-        frames = [frame for frame in (body.frames or []) if frame][:4] or [body.image_base64]
+        stage_started = time.perf_counter()
         raw = await chat_once(
             SCAN_SYSTEM,
             f"Analyze these {len(frames)} views of the same filming environment for the user's planned video. Combine evidence across views, avoid guessing objects that are not visible, and return all descriptive text in {language}.\n{context}",
             frames,
+            model=GEMINI_SCAN_MODEL, max_output_tokens=512,
+            thinking_level="minimal", max_attempts=1, timeout=(5, 8),
         )
+        gemini_ms = round((time.perf_counter() - stage_started) * 1000)
         data = extract_json(raw)
         if not isinstance(data, dict):
             raise ValueError("bad scan json")
         data["ai_generated"] = True
     except Exception as e:
         log.exception("scan fail: %s", e)
-        data = {
-            "summary": "Scene analyzed",
-            "lighting": "natural_soft",
-            "lighting_quality_score": 72,
-            "composition_score": 68,
-            "subjects": ["subject"],
-            "objects": [],
-            "background": "clean",
-            "best_time_of_day": "golden hour",
-            "recommended_style": "cinematic",
-            "suggested_shots": ["Wide establishing", "Medium tracking", "Close-up detail"],
-            "tips": ["Move toward natural light", "Keep background simple", "Steady both hands"],
-            "ai_generated": False,
-        }
+        raise HTTPException(503, "AI scene analysis is temporarily unavailable. Please try again.") from e
     if doc:
         doc.update({"scene_map": data, "language": selected_code if selected_code in LANGUAGE_NAMES else doc.get("language", "en"),
                     "updated_at": datetime.now(timezone.utc).isoformat()})
+        stage_started = time.perf_counter()
         await save_project(doc, user["id"])
+        project_save_ms = round((time.perf_counter() - stage_started) * 1000)
+    else:
+        project_save_ms = 0
+    log.info("scan timing project_fetch_ms=%s gemini_ms=%s project_save_ms=%s total_ms=%s frames=%s model=%s",
+             project_fetch_ms, gemini_ms, project_save_ms,
+             round((time.perf_counter() - scan_started) * 1000), len(frames), GEMINI_SCAN_MODEL)
     return data
 
 

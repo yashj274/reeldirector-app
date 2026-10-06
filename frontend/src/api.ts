@@ -347,7 +347,7 @@ export const api = {
     method: 'POST', body: JSON.stringify({ language: await getLanguage() }),
   }),
   scan: async (project_id: string, image_base64: string, frames: string[] = []) => request('/scan', {
-    method: 'POST', body: JSON.stringify({ project_id, image_base64, frames, language: await getLanguage() }),
+    method: 'POST', body: JSON.stringify({ project_id, frames: frames.length ? frames : [image_base64], language: await getLanguage() }),
   }),
   director: async (project_id: string, shot_index: number, image_base64?: string) =>
     request('/director/instruct', {

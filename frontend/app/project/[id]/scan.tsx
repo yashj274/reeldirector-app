@@ -8,10 +8,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
 import { api } from '@/src/api';
 import { useT } from '@/src/i18n';
 import { theme } from '@/src/theme';
+
+const MAX_SCAN_FRAMES = 2;
 
 export default function Scan() {
   const { id } = useLocalSearchParams<{ id: string; flow?: string }>();
@@ -49,21 +52,26 @@ export default function Scan() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     const captureNext = async () => {
       try {
-        const photo = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.35, skipProcessing: true });
-        if (photo?.base64) {
-          scanFramesRef.current = [...scanFramesRef.current, photo.base64].slice(-4);
+        const photo = await cameraRef.current?.takePictureAsync({ quality: 0.45, skipProcessing: true });
+        if (photo?.uri) {
+          const resized = await manipulateAsync(
+            photo.uri,
+            [{ resize: { width: 512 } }],
+            { compress: 0.6, format: SaveFormat.JPEG, base64: true },
+          );
+          if (resized.base64) scanFramesRef.current = [...scanFramesRef.current, resized.base64].slice(-MAX_SCAN_FRAMES);
           setFramesCaptured(scanFramesRef.current.length);
         }
       } catch (error) {
         console.warn('Environment scan frame capture failed:', error);
         if (!scanFramesRef.current.length) setScanError('Could not capture a view. Check camera access and try again.');
       }
-      if (scanActiveRef.current && scanFramesRef.current.length < 4) {
+      if (scanActiveRef.current && scanFramesRef.current.length < MAX_SCAN_FRAMES) {
         scanTimerRef.current = setTimeout(() => {
           const nextCapture = captureNext();
           captureTaskRef.current = nextCapture;
           void nextCapture;
-        }, 900);
+        }, 650);
       }
     };
     const firstCapture = captureNext();
