@@ -197,11 +197,13 @@ async def current_user(authorization: Optional[str] = Header(None)) -> Dict[str,
     if not account:
         raise HTTPException(401, "User not found")
     metadata = account.user_metadata or {}
+    skill_level = metadata.get("creator_skill_level")
     return {
         "id": str(account.id),
         "email": account.email,
         "name": metadata.get("name") or metadata.get("full_name") or "Director",
         "plan": metadata.get("plan", "free"),
+        "creator_skill_level": skill_level if skill_level in {"beginner", "creator", "pro"} else "beginner",
     }
 
 async def fetch_project(pid: str, user_id: str) -> Optional[Dict[str, Any]]:
@@ -268,6 +270,14 @@ def _escape_filter_path(path: Path) -> str:
     return path.as_posix().replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
 
+def _has_audio_stream(concat_file: Path, ffmpeg: str) -> bool:
+    probe = subprocess.run(
+        [ffmpeg, "-hide_banner", "-f", "concat", "-safe", "0", "-i", str(concat_file)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20, cwd=concat_file.parent,
+    )
+    return any(re.search(r"Stream #\d+:\d+.*Audio:", line) for line in probe.stderr.decode(errors="replace").splitlines())
+
+
 def _ffmpeg_executable() -> str:
     return shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -331,11 +341,19 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
     external_audio_labels = []
     audio_filters = []
     source_audio_filter = f"{'atempo=1.25,' if editing_style == 'fast_pace' else ''}volume={max(0.0, min(1.0, original_volume))}"
-    audio_filters.append(f"[0:a]{source_audio_filter}[original]")
-    external_audio_labels.append("[original]")
-    next_input = 1
     mix_music = soundtrack_file is not None and music_volume > 0
     mix_voiceover = voiceover_file is not None and voiceover_volume > 0
+    probe_audio = mix_music or mix_voiceover or editing_style == "fast_pace" or original_volume != 1.0
+    has_source_audio = _has_audio_stream(concat_file, ffmpeg) if probe_audio else True
+    next_input = 1
+    if mix_music or mix_voiceover:
+        if has_source_audio:
+            audio_filters.append(f"[0:a]{source_audio_filter}[original]")
+        else:
+            command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"])
+            audio_filters.append(f"[{next_input}:a]anull[original]")
+            next_input += 1
+        external_audio_labels.append("[original]")
     if mix_music:
         command.extend(["-stream_loop", "-1", "-i", str(soundtrack_file)])
         audio_filters.append(f"[{next_input}:a]volume={max(0.0, min(1.0, music_volume))}[music]")
@@ -348,14 +366,18 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
         external_audio_labels.append("[voiceover]")
     command.extend(["-vf", video_filter, "-map", "0:v:0"])
     if mix_music or mix_voiceover:
-        audio_filters.append(
-            f"{''.join(external_audio_labels)}amix=inputs={len(external_audio_labels)}:"
-            "duration=first:dropout_transition=2[aout]"
-        )
+        if len(external_audio_labels) > 1:
+            audio_filters.append(
+                f"{''.join(external_audio_labels)}amix=inputs={len(external_audio_labels)}:"
+                "duration=first:dropout_transition=2[aout]"
+            )
+            audio_label = "[aout]"
+        else:
+            audio_label = external_audio_labels[0]
         command.extend([
-            "-filter_complex", ";".join(audio_filters), "-map", "[aout]",
+            "-filter_complex", ";".join(audio_filters), "-map", audio_label,
         ])
-    else:
+    elif has_source_audio:
         command.extend(["-map", "0:a?"])
         if editing_style == "fast_pace" or original_volume != 1.0:
             command.extend(["-filter:a", source_audio_filter])
@@ -776,6 +798,14 @@ UI_TRANSLATION_SOURCE = {
     "recent_projects": "Recent projects", "see_all": "See all", "first_masterpiece": "Your first masterpiece is one tap away.",
     "try_again": "Try again", "sign_in_again": "Sign in again", "no_projects": "No projects yet. Tap + to create one.",
     "profile": "Profile", "preferences": "Preferences", "account": "Account", "support": "Support",
+    "creator_skill_level": "How much filming experience do you have?",
+    "skill_help": "You can change this anytime. Beginner is the default.",
+    "beginner": "Beginner", "creator": "Creator", "pro": "Pro",
+    "phase_hook": "Hook", "phase_detail": "Detail", "phase_action": "Action", "phase_hero": "Hero", "phase_cta": "Ending",
+    "shot_current": "Current", "shot_done": "Done", "shot_upcoming": "Upcoming", "shot_retake": "Retake",
+    "shot_skipped": "Skipped", "shot_plan": "Shot plan", "skip_shot": "Skip this shot", "include_shot": "Include this shot",
+    "storyboard_preserved": "AI could not update the plan. Your saved storyboard and clips are unchanged.",
+    "all_shots_skipped": "All shots are skipped. Include one to start filming.",
     "language": "Language", "editing_style": "Editing style", "subscription": "Subscription", "downloads": "Downloads",
     "notifications": "Notifications", "help_faq": "Help & FAQ", "send_feedback": "Send Feedback", "privacy": "Privacy",
     "log_out": "Log out", "home": "Home", "projects": "Projects", "templates": "Templates",
@@ -885,17 +915,70 @@ async def translate_ui(language_code: str):
     return {"language": code, "translations": UI_TRANSLATION_CACHE[code]}
 
 STORYBOARD_SYSTEM = """You are a culturally informed film director and short-form video scriptwriter.
-Return ONLY one JSON object with keys `script` (a concise, coherent 2-4 sentence concept or voiceover in the requested language) and `shots` (an array of 4 to 8 shots). Each shot object has these keys:
-- index (int, starting 0)
-- title (short, e.g., "Opening Wide Shot")
-- description (1 sentence directing what appears on screen)
-- narration (a short optional spoken line in the requested language; use an empty string when voiceover would feel unnatural)
-- on_screen_text (a short optional caption in the requested language)
-- camera_movement (one of: static, pan_left, pan_right, tilt_up, tilt_down, dolly_in, dolly_out, tracking, orbit, reveal, handheld)
-- shot_size (one of: extreme_wide, wide, medium, close_up, extreme_close_up)
-- duration_seconds (float, 1.5 to 12.0)
-- direction (1 sentence telling the person holding the phone what to do physically, e.g., "Stand 6 feet back, hold phone at chest height, slowly walk forward.")
-No prose outside the JSON. Keep all script, shot titles, descriptions, narration, captions, and physical directions in the requested language. Be specific to the user's purpose and audience. Infer cultural meaning from clear event names (for example, a mehndi is commonly a South Asian pre-wedding celebration centered on henna art, close family moments, music, and ritual); use that understanding respectfully, adapt details to the supplied scene scan, and never invent people or rituals that the user did not describe or the image does not support. Do not replace the user's event with a generic template."""
+Return ONLY one JSON object with `title`, `concept`, `style`, `goal`, `totalDuration`, `hook`, `cta`, and `shots`. Return 4 to 8 shots. Each shot includes `shotNumber` (1-based), `purpose` (hook/detail/action/hero/cta), `shotType`, `duration`, `cameraMovement`, `animationTemplate`, `subjectPosition`, `cameraStart`, `cameraEnd`, `instruction`, `voiceover`, `onScreenText`, and `difficulty` (easy/medium/advanced), plus `title` and `description`.
+Use these movements: static, pan_left, pan_right, tilt_up, tilt_down, dolly_in, dolly_out, tracking, orbit, reveal, handheld. Use these shot types: extreme_wide, wide, medium, close_up, extreme_close_up. Durations must be 1.5 to 12 seconds and add up close to the requested total.
+Keep each on-camera `instruction` to one simple sentence of 8-12 words or fewer, in the requested language. Beginner instructions use everyday words and no camera jargon. Creator instructions may add one framing or movement detail. Pro instructions may use concise filming terminology. Keep descriptions to one sentence. Voiceover and on-screen text are optional; use empty strings when they do not help the story.
+No prose outside JSON. Be specific to the user's purpose and audience. Infer cultural meaning from clear event names (for example, a mehndi is commonly a South Asian pre-wedding celebration centered on henna art, close family moments, music, and ritual); use that understanding respectfully, adapt details to the supplied scene scan, and never invent people or rituals that the user did not describe or the image does not support. Do not replace the user's event with a generic template."""
+
+STORY_PHASES = ("hook", "detail", "action", "hero", "cta")
+
+
+def normalise_storyboard_shot(shot: Any, index: int, total: int) -> Dict[str, Any]:
+    if not isinstance(shot, dict):
+        raise ValueError("storyboard shot must be an object")
+    movement = str(shot.get("cameraMovement") or shot.get("camera_movement") or "static").strip().lower()
+    shot_type = str(shot.get("shotType") or shot.get("shot_size") or "medium").strip().lower()
+    instruction = str(shot.get("instruction") or shot.get("direction") or "").strip()
+    direction = str(shot.get("direction") or instruction).strip()
+    title = str(shot.get("title") or "").strip()
+    description = str(shot.get("description") or "").strip()
+    duration = float(shot.get("duration", shot.get("duration_seconds", 0)))
+    if not title or not description or not instruction or not direction:
+        raise ValueError("storyboard shot text is incomplete")
+    if not 1.5 <= duration <= 12:
+        raise ValueError("storyboard shot duration is invalid")
+    if index == 0:
+        default_phase = "hook"
+    elif index == total - 1:
+        default_phase = "cta"
+    else:
+        middle_phases = ("detail", "action", "hero")
+        phase_index = round((index - 1) * (len(middle_phases) - 1) / max(1, total - 2))
+        default_phase = middle_phases[phase_index]
+    phase = str(shot.get("purpose") or default_phase).lower()
+    if phase not in STORY_PHASES:
+        phase = default_phase
+    voiceover = str(shot.get("voiceover") or shot.get("narration") or "")
+    on_screen_text = str(shot.get("onScreenText") or shot.get("on_screen_text") or "")
+    return {
+        **shot, "shotNumber": index + 1, "index": index, "purpose": phase,
+        "shotType": shot_type, "shot_size": shot_type,
+        "duration": duration, "duration_seconds": duration,
+        "cameraMovement": movement, "camera_movement": movement,
+        "animationTemplate": str(shot.get("animationTemplate") or f"{movement}_01"),
+        "subjectPosition": str(shot.get("subjectPosition") or "center"),
+        "cameraStart": str(shot.get("cameraStart") or ""),
+        "cameraEnd": str(shot.get("cameraEnd") or ""),
+        "instruction": instruction, "direction": direction,
+        "voiceover": voiceover, "narration": voiceover,
+        "onScreenText": on_screen_text, "on_screen_text": on_screen_text,
+        "difficulty": shot.get("difficulty") or "easy",
+        "status": shot.get("status") or "pending",
+    }
+
+
+def normalise_storyboard(shots: Any) -> List[Dict[str, Any]]:
+    if not isinstance(shots, list) or not 4 <= len(shots) <= 8:
+        raise ValueError("storyboard must contain four to eight shots")
+    return [normalise_storyboard_shot(shot, index, len(shots)) for index, shot in enumerate(shots)]
+
+
+def storyboard_is_valid(shots: Any) -> bool:
+    try:
+        normalise_storyboard(shots)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def fallback_storyboard(doc: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
@@ -1032,11 +1115,11 @@ Platform: {doc['platform']}
 Target duration: {doc['duration_seconds']} seconds
 Audience: {doc['audience'] or 'general'}
 Selected language: {language}
+Creator skill level: {user.get('creator_skill_level', 'beginner')}
 Environment scan: {scene_context}
 
-Use the title and creator's explanation as the source of truth. Notice cultural/event references and make the storytelling, shot ideas, props/details, and narration fit that occasion. Use the environment scan to choose subjects, backgrounds, lighting, and feasible framing; never claim a person or object is present unless the scan supports it. Return the script plus 4 to 8 shots that sum to approximately {doc['duration_seconds']} seconds.
-Use durations between 1.5 and 12 seconds so the complete storyboard matches the target duration.
-Make it cinematic, practical to film on a phone, and tailored to {doc['platform']}."""
+Use the title and creator's explanation as the source of truth. Notice cultural/event references and make the storytelling, shot ideas, props/details, and narration fit that occasion. Use the environment scan to choose subjects, backgrounds, lighting, and feasible framing; never claim a person or object is present unless the scan supports it. Return the complete structured storyboard with title, concept, style, goal, totalDuration, hook, cta, and 4 to 8 shots whose durations add up close to {doc['duration_seconds']} seconds.
+Make it practical to film on a phone and tailored to {doc['platform']}. Match the creator skill level in every short instruction."""
 
     ai_generated = True
     script = ""
@@ -1044,21 +1127,44 @@ Make it cinematic, practical to film on a phone, and tailored to {doc['platform'
         raw = await chat_once(STORYBOARD_SYSTEM, prompt)
         response_data = extract_json(raw)
         if isinstance(response_data, dict):
-            shots = response_data.get("shots")
-            script = str(response_data.get("script") or "").strip()
+            shots = normalise_storyboard(response_data.get("shots"))
+            script = str(response_data.get("concept") or response_data.get("script") or "").strip()
+            if not script:
+                raise ValueError("storyboard concept is missing")
+            plan = {
+                "title": str(response_data.get("title") or doc.get("title") or "").strip(),
+                "concept": script,
+                "style": str(response_data.get("style") or doc.get("style") or "cinematic"),
+                "goal": str(response_data.get("goal") or doc.get("purpose") or ""),
+                "totalDuration": round(sum(shot["duration_seconds"] for shot in shots), 1),
+                "hook": str(response_data.get("hook") or shots[0]["description"]),
+                "cta": str(response_data.get("cta") or shots[-1]["description"]),
+            }
         else:
-            shots = response_data
-        if not isinstance(shots, list) or not 4 <= len(shots) <= 8 or any(not isinstance(shot, dict) for shot in shots):
-            raise ValueError("storyboard must contain four to eight valid shots")
-        required_text = ("title", "description", "direction")
-        if any(not all(isinstance(shot.get(key), str) and shot[key].strip() for key in required_text) for shot in shots):
-            raise ValueError("storyboard shot text is incomplete")
-        if any(not 1.5 <= float(shot.get("duration_seconds", 0)) <= 12 for shot in shots):
-            raise ValueError("storyboard shot durations are invalid")
+            shots = normalise_storyboard(response_data)
+            script = str(doc.get("script") or doc.get("purpose") or "").strip()
+            plan = {
+                "title": doc.get("title", ""), "concept": script,
+                "style": doc.get("style") or "cinematic", "goal": doc.get("purpose") or "",
+                "totalDuration": round(sum(shot["duration_seconds"] for shot in shots), 1),
+                "hook": shots[0]["description"], "cta": shots[-1]["description"],
+            }
     except Exception as e:
-        log.warning("storyboard generation unavailable; using local fallback: %s", e)
+        log.warning("storyboard generation unavailable or invalid: %s", e)
+        if storyboard_is_valid(doc.get("storyboard")):
+            return {
+                "storyboard": doc["storyboard"], "script": doc.get("script", ""),
+                "ai_generated": doc.get("storyboard_ai_generated", True), "preserved_existing": True,
+            }
         ai_generated = False
         script, shots = fallback_storyboard(doc)
+        shots = normalise_storyboard(shots)
+        plan = {
+            "title": doc.get("title", ""), "concept": script,
+            "style": doc.get("style") or "cinematic", "goal": doc.get("purpose") or "",
+            "totalDuration": round(sum(shot["duration_seconds"] for shot in shots), 1),
+            "hook": shots[0]["description"], "cta": shots[-1]["description"],
+        }
 
     existing_status_by_index = {
         int(previous.get("index", index)): previous.get("status")
@@ -1066,22 +1172,26 @@ Make it cinematic, practical to film on a phone, and tailored to {doc['platform'
         if isinstance(previous, dict)
     }
     for i, s in enumerate(shots):
-        s["index"] = i
         previous_status = existing_status_by_index.get(i)
         s["status"] = previous_status if previous_status in {"captured", "retake"} else "pending"
 
-    doc.update({"storyboard": shots, "script": script, "status": "storyboarded",
+    doc.update({"storyboard": shots, "storyboard_plan": plan, "script": script, "status": "storyboarded",
                 "storyboard_ai_generated": ai_generated,
                 "storyboard_user_edited": False,
                 "updated_at": datetime.now(timezone.utc).isoformat()})
     await save_project(doc, user["id"])
-    return {"storyboard": shots, "ai_generated": ai_generated}
+    return {"storyboard": shots, "storyboard_plan": plan, "script": script, "ai_generated": ai_generated}
 
 
 # ---------------- AI: Environment Scanner (vision) ----------------
 SCAN_SYSTEM = """You are an expert cinematographer analyzing several views of one filming environment.
 Compare all supplied frames as one place, then return ONLY a compact JSON object with these keys:
 - summary (1 short sentence describing the scene)
+- location_type (short label), environment (indoor/outdoor/unclear), main_subject (short label)
+- light_direction (left/right/front/back/overhead/diffuse/unclear), movement_space (limited/moderate/open)
+- available_movements (array chosen from: push_in, pull_back, pan_left, pan_right, tilt_up, tilt_down, orbit, top_down, static)
+- recommended_angles (array chosen from: wide, eye_level, 45_degree, close_up, top_down)
+- visual_warnings (array of visible filming issues; empty when none)
 - lighting (one of: natural_bright, natural_soft, natural_low, indoor_warm, indoor_cool, mixed, backlit)
 - lighting_quality_score (0-100)
 - composition_score (0-100)
@@ -1892,17 +2002,14 @@ Selected language: {language}
 Environment scan: {json.dumps(scan_context, ensure_ascii=False)}
 Current shot: {json.dumps(existing)}
 User notes: {body.notes or 'make it more cinematic'}
-Return ONLY one JSON object matching the same keys (index, title, description, camera_movement, shot_size, duration_seconds, direction). Keep all written fields in {language} and fit the project context and actual scanned environment."""
+Creator skill level: {user.get('creator_skill_level', 'beginner')}
+Return one shot object using the storyboard shot fields shotNumber, purpose, shotType, duration, cameraMovement, animationTemplate, subjectPosition, cameraStart, cameraEnd, instruction, voiceover, onScreenText, difficulty, title, and description. Keep the action instruction under 12 words and all written fields in {language}. Fit the project purpose and actual scanned environment."""
     try:
-        raw = await chat_once(
-            STORYBOARD_SYSTEM.replace("array of shots", "single shot object"), prompt
-        )
+        raw = await chat_once("You are a culturally informed short-form video director. Return only one valid JSON shot object; do not include a storyboard wrapper or prose.", prompt)
         newshot = extract_json(raw)
         if isinstance(newshot, list) and newshot:
             newshot = newshot[0]
-        if not isinstance(newshot, dict):
-            raise ValueError("bad regen")
-        newshot["index"] = body.shot_index
+        newshot = normalise_storyboard_shot(newshot, body.shot_index, len(shots))
         newshot["status"] = "pending"
         shots[body.shot_index] = newshot
     except Exception as e:

@@ -21,10 +21,19 @@ export default function ProjectDetail() {
   const [generating, setGenerating] = useState(false);
   const [startingShooting, setStartingShooting] = useState(false);
   const [storyboardNotice, setStoryboardNotice] = useState('');
+  const [focusedShotIndex, setFocusedShotIndex] = useState(0);
+  const [updatingShot, setUpdatingShot] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
-    try { setProj(await api.getProject(id)); } catch (e) { console.warn(e); }
+    try {
+      const project = await api.getProject(id);
+      setProj(project);
+      const clips = new Set((project.clips || []).map((clip: any) => Number(clip.shot_index)));
+      const next = (project.storyboard || []).findIndex((shot: any, index: number) =>
+        !clips.has(index) || shot.status === 'retake');
+      if (next >= 0) setFocusedShotIndex(next);
+    } catch (e) { console.warn(e); }
     finally { setLoading(false); }
   }, [id]);
 
@@ -36,9 +45,11 @@ export default function ProjectDetail() {
     try {
       const result = await api.storyboard(id);
       await load();
-      setStoryboardNotice(result?.ai_generated === false
-        ? 'This script is tailored to your description and the scene scan, if available. You can edit every shot or retry the AI custom script.'
-        : '');
+      setStoryboardNotice(result?.preserved_existing
+        ? t('storyboard_preserved')
+        : result?.ai_generated === false
+          ? 'This script is tailored to your description and the scene scan, if available. You can edit every shot or retry the AI custom script.'
+          : '');
     } catch (e: any) {
       console.warn(e);
       setStoryboardNotice(e.message || 'Could not create a storyboard. Please try again.');
@@ -54,6 +65,19 @@ export default function ProjectDetail() {
     } catch (e: any) {
       Alert.alert('Could not retake shot', e.message || 'Please try again.');
     }
+  };
+
+  const toggleSkipped = async () => {
+    if (!id || updatingShot) return;
+    const shot = proj?.storyboard?.[focusedShotIndex];
+    if (!shot) return;
+    setUpdatingShot(true);
+    try {
+      await api.setShotSkipped(id, focusedShotIndex, shot.status !== 'skipped');
+      await load();
+    } catch (error: any) {
+      Alert.alert('Could not update this shot', error?.message || 'Please try again.');
+    } finally { setUpdatingShot(false); }
   };
 
   const startShooting = async () => {
@@ -76,8 +100,15 @@ export default function ProjectDetail() {
       setStartingShooting(false);
     }
     const saved = new Set((targetProject.clips || []).map((clip: any) => Number(clip.shot_index)));
-    const pending = (targetProject.storyboard || []).findIndex((_shot: any, index: number) => !saved.has(index));
-    router.push({ pathname: '/project/[id]/camera', params: { id, shot: String(pending >= 0 ? pending : 0) } });
+    const isAvailable = (index: number) => targetProject.storyboard?.[index]?.status !== 'skipped'
+      && (!saved.has(index) || targetProject.storyboard?.[index]?.status === 'retake');
+    const focused = isAvailable(focusedShotIndex) ? focusedShotIndex : -1;
+    const pending = (targetProject.storyboard || []).findIndex((_shot: any, index: number) => isAvailable(index));
+    if (pending < 0 && saved.size === 0) {
+      Alert.alert(t('shot_plan'), t('all_shots_skipped'));
+      return;
+    }
+    router.push({ pathname: '/project/[id]/camera', params: { id, shot: String(focused >= 0 ? focused : Math.max(0, pending)) } });
   };
 
   if (loading || !proj) {
@@ -89,7 +120,9 @@ export default function ProjectDetail() {
   }
 
   const captured = (proj.storyboard || []).filter((s: any) => s.status === 'captured').length;
+  const skipped = (proj.storyboard || []).filter((s: any) => s.status === 'skipped').length;
   const total = (proj.storyboard || []).length;
+  const finishedCount = Math.min(total, captured + skipped);
   return (
     <View style={styles.root} testID="project-detail-screen">
       <SafeAreaView edges={['top']} style={{ flex: 1 }}>
@@ -154,8 +187,49 @@ export default function ProjectDetail() {
                 </View>
               </View>
               <View style={styles.progressTrack}>
-                <View style={[styles.progressFill, { width: total ? `${(captured / total) * 100}%` : '0%' }]} />
+                <View style={[styles.progressFill, { width: total ? `${(finishedCount / total) * 100}%` : '0%' }]} />
               </View>
+
+              <Text style={styles.timelineTitle}>{t('shot_plan')}</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.timeline}>
+                {(proj.storyboard || []).map((shot: any, index: number) => {
+                  const hasClip = (proj.clips || []).some((clip: any) => Number(clip.shot_index) === index);
+                  const status = shot.status === 'skipped' ? 'shot_skipped'
+                    : shot.status === 'retake' ? 'shot_retake'
+                    : shot.status === 'captured' || hasClip ? 'shot_done'
+                      : index === focusedShotIndex ? 'shot_current' : 'shot_upcoming';
+                  const phase = ['hook', 'detail', 'action', 'hero', 'cta'].includes(shot.purpose)
+                    ? `phase_${shot.purpose}` : `phase_${['hook', 'detail', 'action', 'hero', 'cta'][Math.min(index, 4)]}`;
+                  return (
+                    <Pressable key={`timeline-${index}`} onPress={() => setFocusedShotIndex(index)}
+                      style={[styles.timelineStep, index === focusedShotIndex && styles.timelineStepOn]}
+                      accessibilityRole="button" accessibilityState={{ selected: index === focusedShotIndex }}
+                      testID={`storyboard-timeline-shot-${index}`}>
+                      <View style={styles.timelineStepTop}>
+                        <Text style={[styles.timelineNumber, index === focusedShotIndex && styles.timelineTextOn]}>{index + 1}</Text>
+                        <Text style={[styles.timelineStatus, shot.status === 'retake' && { color: theme.color.warning }]}>{t(status)}</Text>
+                      </View>
+                      <Text style={styles.timelinePhase}>{t(phase)}</Text>
+                      <Text numberOfLines={1} style={styles.timelineMovement}>{t(`move_${shot.camera_movement || 'static'}`)} · {shot.duration_seconds}s</Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+              {proj.storyboard?.[focusedShotIndex] && (
+                <View style={styles.focusedShot} testID="storyboard-timeline-detail">
+                  <Text style={styles.focusedShotTitle}>{proj.storyboard[focusedShotIndex].title}</Text>
+                  <Text style={styles.focusedShotInstruction}>
+                    {String(proj.storyboard[focusedShotIndex].instruction || proj.storyboard[focusedShotIndex].direction || proj.storyboard[focusedShotIndex].description || '').split(/[.!?]/, 1)[0].split(/\s+/).slice(0, 12).join(' ')}
+                  </Text>
+                  {!(proj.clips || []).some((clip: any) => Number(clip.shot_index) === focusedShotIndex) && (
+                    <Pressable onPress={() => void toggleSkipped()} disabled={updatingShot}
+                      style={styles.skipShotButton} testID="storyboard-toggle-skipped">
+                      {updatingShot ? <ActivityIndicator size="small" color={theme.color.brand} /> : null}
+                      <Text style={styles.skipShotText}>{proj.storyboard[focusedShotIndex].status === 'skipped' ? t('include_shot') : t('skip_shot')}</Text>
+                    </Pressable>
+                  )}
+                </View>
+              )}
 
               <View style={{ gap: 10, marginTop: 16 }}>
                 {(proj.storyboard || []).map((s: any) => {
@@ -167,12 +241,11 @@ export default function ProjectDetail() {
                     </View>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.shotTitle}>{s.title}</Text>
-                      <Text style={styles.shotDesc} numberOfLines={2}>{s.description}</Text>
+                      <Text style={styles.shotDesc} numberOfLines={2}>{s.instruction || s.direction || s.description}</Text>
                       {!!s.narration && <Text style={styles.shotNarration}>{s.narration}</Text>}
                       {!!s.on_screen_text && <Text style={styles.shotCaption}>{s.on_screen_text}</Text>}
                       <View style={styles.shotTags}>
-                        <Text style={styles.shotTag}>{(s.shot_size || '').replace('_', ' ')}</Text>
-                        <Text style={styles.shotTag}>{(s.camera_movement || '').replace('_', ' ')}</Text>
+                        <Text style={styles.shotTag}>{t(`move_${s.camera_movement || 'static'}`)}</Text>
                         <Text style={styles.shotTag}>{s.duration_seconds?.toFixed?.(1) ?? s.duration_seconds}s</Text>
                       </View>
                       {clip && (
@@ -271,6 +344,21 @@ const styles = StyleSheet.create({
   progress: { color: theme.color.onSurface2, fontSize: 13, fontWeight: '600' },
   progressTrack: { height: 6, borderRadius: 3, backgroundColor: theme.color.surface3, marginTop: 10, overflow: 'hidden' },
   progressFill: { height: '100%', backgroundColor: theme.color.brand },
+  timelineTitle: { color: theme.color.onSurface2, fontSize: 12, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 1, marginTop: 20, marginBottom: 10 },
+  timeline: { gap: 8, paddingBottom: 2 },
+  timelineStep: { width: 132, minHeight: 82, padding: 10, borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border, justifyContent: 'space-between' },
+  timelineStepOn: { borderColor: theme.color.brand, backgroundColor: theme.color.brandTint },
+  timelineStepTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  timelineNumber: { color: theme.color.onSurface2, fontSize: 12, fontWeight: '800' },
+  timelineTextOn: { color: theme.color.brand },
+  timelineStatus: { color: theme.color.onSurface3, fontSize: 10, fontWeight: '700' },
+  timelinePhase: { color: theme.color.onSurface, fontSize: 14, fontWeight: '700', marginTop: 7 },
+  timelineMovement: { color: theme.color.onSurface3, fontSize: 10, marginTop: 2 },
+  focusedShot: { padding: 13, marginTop: 10, borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border },
+  focusedShotTitle: { color: theme.color.onSurface, fontSize: 14, fontWeight: '700' },
+  focusedShotInstruction: { color: theme.color.onSurface2, fontSize: 13, lineHeight: 18, marginTop: 5 },
+  skipShotButton: { alignSelf: 'flex-start', minHeight: 36, paddingHorizontal: 10, marginTop: 10, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.color.border, flexDirection: 'row', alignItems: 'center', gap: 7 },
+  skipShotText: { color: theme.color.brand, fontSize: 12, fontWeight: '700' },
   shot: { flexDirection: 'row', gap: 12, padding: 14, borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border, alignItems: 'flex-start' },
   shotNum: { width: 32, height: 32, borderRadius: 16, backgroundColor: theme.color.brandTint, alignItems: 'center', justifyContent: 'center' },
   shotNumText: { color: theme.color.brand, fontWeight: '700' },

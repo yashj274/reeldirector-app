@@ -29,6 +29,10 @@ function getBackendBase() {
 const BASE = getBackendBase();
 const TOKEN_KEY = 'reeldirector.token';
 const USER_KEY = 'reeldirector.user';
+const CREATOR_SKILL_KEY = 'reeldirector.creatorSkill';
+export type CreatorSkillLevel = 'beginner' | 'creator' | 'pro';
+const isCreatorSkillLevel = (value: unknown): value is CreatorSkillLevel =>
+  value === 'beginner' || value === 'creator' || value === 'pro';
 const SIGNED_URL_CACHE_TTL_MS = 50 * 60 * 1000;
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
 let backendWarmupAttemptedAt = 0;
@@ -66,7 +70,31 @@ function profile(user: any) {
     email: user.email,
     name: metadata.name || metadata.full_name || 'Director',
     plan: metadata.plan || 'free',
+    creator_skill_level: isCreatorSkillLevel(metadata.creator_skill_level) ? metadata.creator_skill_level : 'beginner',
   };
+}
+
+export async function getCreatorSkillLevel(): Promise<CreatorSkillLevel> {
+  const local = await AsyncStorage.getItem(CREATOR_SKILL_KEY);
+  if (!hasSupabaseConfig()) return isCreatorSkillLevel(local) ? local : 'beginner';
+  const { data } = await getSupabase().auth.getSession();
+  const saved = data.session?.user.user_metadata?.creator_skill_level;
+  if (isCreatorSkillLevel(saved)) {
+    await AsyncStorage.setItem(CREATOR_SKILL_KEY, saved);
+    return saved;
+  }
+  return isCreatorSkillLevel(local) ? local : 'beginner';
+}
+
+export async function setCreatorSkillLevel(level: CreatorSkillLevel): Promise<void> {
+  await AsyncStorage.setItem(CREATOR_SKILL_KEY, level);
+  if (!hasSupabaseConfig()) return;
+  const { data, error } = await getSupabase().auth.getSession();
+  if (error) throw error;
+  if (data.session) {
+    const result = await getSupabase().auth.updateUser({ data: { creator_skill_level: level } });
+    if (result.error) throw result.error;
+  }
 }
 
 async function currentUser() {
@@ -148,7 +176,7 @@ export async function getUser(): Promise<any | null> {
 
 export async function clearAuth() {
   if (hasSupabaseConfig()) await getSupabase().auth.signOut();
-  await AsyncStorage.multiRemove([TOKEN_KEY, USER_KEY]);
+  await AsyncStorage.multiRemove([TOKEN_KEY, USER_KEY, CREATOR_SKILL_KEY]);
 }
 
 async function request(path: string, opts: RequestInit = {}): Promise<any> {
@@ -255,6 +283,7 @@ async function removeAudioTrack(projectId: string, track: 'soundtrack' | 'voiceo
 export const api = {
   warmBackend,
   signup: async (email: string, password: string, name: string) => {
+    const creatorSkillLevel = await AsyncStorage.getItem(CREATOR_SKILL_KEY);
     const emailRedirectTo = Platform.OS === 'web' && typeof window !== 'undefined'
       ? `${window.location.origin}/auth/callback`
       : Linking.createURL('auth/callback');
@@ -262,7 +291,7 @@ export const api = {
       email,
       password,
       options: {
-        data: { name, full_name: name, plan: 'free' },
+        data: { name, full_name: name, plan: 'free', creator_skill_level: isCreatorSkillLevel(creatorSkillLevel) ? creatorSkillLevel : 'beginner' },
         emailRedirectTo,
       },
     });
@@ -273,6 +302,18 @@ export const api = {
     const { data, error } = await getSupabase().auth.signInWithPassword({ email, password });
     if (error) throw error;
     if (!data.session) throw new Error('Confirm your email before signing in.');
+    const savedLevel = data.user.user_metadata?.creator_skill_level;
+    if (isCreatorSkillLevel(savedLevel)) {
+      await AsyncStorage.setItem(CREATOR_SKILL_KEY, savedLevel);
+    } else {
+      const localLevel = await AsyncStorage.getItem(CREATOR_SKILL_KEY);
+      try {
+        const result = await getSupabase().auth.updateUser({ data: { creator_skill_level: isCreatorSkillLevel(localLevel) ? localLevel : 'beginner' } });
+        if (result.error) throw result.error;
+      } catch (error) {
+        console.warn('Could not sync creator level yet:', error);
+      }
+    }
     return { user: profile(data.user) };
   },
   requestPasswordReset: async (email: string) => {
@@ -475,6 +516,13 @@ export const api = {
       clip.frame_storage_path, clip.video_storage_path,
     ]).filter(Boolean));
     return { ok: true, shot_index };
+  },
+  setShotSkipped: async (id: string, shot_index: number, skipped: boolean) => {
+    const project = await readProject(id);
+    const storyboard = project.storyboard || [];
+    if (storyboard[shot_index]) storyboard[shot_index].status = skipped ? 'skipped' : 'pending';
+    await updateProjectData({ ...project, storyboard, updated_at: new Date().toISOString() });
+    return { ok: true };
   },
   export: async (
     id: string,

@@ -82,6 +82,11 @@ function movementArrow(movement?: string): string {
   }
 }
 
+function compactInstruction(shot: any, fallback: string) {
+  const text = String(shot?.instruction || shot?.direction || '').split(/[.!?]/, 1)[0].trim();
+  return text ? text.split(/\s+/).slice(0, 12).join(' ') : fallback;
+}
+
 function readVideoFrame(file: File): Promise<VideoFrame> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
@@ -186,9 +191,11 @@ export default function DirectorCamera() {
       setProject(loaded);
       const requested = Math.max(0, Number.parseInt(shot || '0', 10) || 0);
       const existing = (loaded.clips || []).some((clip: any) => Number(clip.shot_index) === requested);
-      const firstUnfilmed = (loaded.storyboard || []).findIndex((_item: any, index: number) =>
-        !(loaded.clips || []).some((clip: any) => Number(clip.shot_index) === index));
-      const selected = existing && firstUnfilmed >= 0 ? firstUnfilmed : requested;
+      const requestedShot = loaded.storyboard?.[requested];
+      const requestedSkipped = requestedShot?.status === 'skipped';
+      const firstUnfilmed = (loaded.storyboard || []).findIndex((item: any, index: number) =>
+        item.status !== 'skipped' && (!(loaded.clips || []).some((clip: any) => Number(clip.shot_index) === index) || item.status === 'retake'));
+      const selected = (existing || requestedSkipped) && firstUnfilmed >= 0 ? firstUnfilmed : requested;
       shotIndexRef.current = selected;
       setShotIndex(selected);
     }).catch(() => {});
@@ -618,10 +625,10 @@ export default function DirectorCamera() {
     if (!id) return;
     const clips = project?.clips || [];
     const storyboard = project?.storyboard || [];
-    const afterCurrent = storyboard.findIndex((_item: any, index: number) =>
-      index > shotIndex && !clips.some((clip: any) => Number(clip.shot_index) === index));
-    const anyPending = afterCurrent >= 0 ? afterCurrent : storyboard.findIndex((_item: any, index: number) =>
-      !clips.some((clip: any) => Number(clip.shot_index) === index));
+    const needsShot = (index: number) => storyboard[index]?.status !== 'skipped'
+      && (!clips.some((clip: any) => Number(clip.shot_index) === index) || storyboard[index]?.status === 'retake');
+    const afterCurrent = storyboard.findIndex((_item: any, index: number) => index > shotIndex && needsShot(index));
+    const anyPending = afterCurrent >= 0 ? afterCurrent : storyboard.findIndex((_item: any, index: number) => needsShot(index));
     if (anyPending >= 0) {
       shotIndexRef.current = anyPending;
       setShotIndex(anyPending);
@@ -710,13 +717,15 @@ export default function DirectorCamera() {
   const currentMovement = String(shotObj?.camera_movement || 'static').toLowerCase().trim().replace(/[\s-]+/g, '_');
   const storyboardShots = project?.storyboard || [];
   const savedShotIndexes = new Set((project?.clips || []).map((clip: any) => Number(clip.shot_index)));
-  const nextUnfilmedAfterCurrent = storyboardShots.findIndex((_item: any, index: number) =>
-    index > shotIndex && !savedShotIndexes.has(index));
-  const firstUnfilmedShot = storyboardShots.findIndex((_item: any, index: number) => !savedShotIndexes.has(index));
+  const needsShot = (index: number) => storyboardShots[index]?.status !== 'skipped'
+    && (!savedShotIndexes.has(index) || storyboardShots[index]?.status === 'retake');
+  const nextUnfilmedAfterCurrent = storyboardShots.findIndex((_item: any, index: number) => index > shotIndex && needsShot(index));
+  const firstUnfilmedShot = storyboardShots.findIndex((_item: any, index: number) => needsShot(index));
   const upcomingShot = nextUnfilmedAfterCurrent >= 0 ? nextUnfilmedAfterCurrent : firstUnfilmedShot;
   const hasUpcomingShot = upcomingShot >= 0;
   const movementLabel = ['static', 'pan_left', 'pan_right', 'tilt_up', 'tilt_down', 'dolly_in', 'dolly_out', 'tracking', 'orbit', 'reveal', 'handheld'].includes(currentMovement)
     ? t(`move_${currentMovement}`) : t('hold_camera_steady');
+  const shotInstruction = compactInstruction(shotObj, movementLabel);
 
   return (
     <View style={styles.root} testID="director-camera-screen">
@@ -806,7 +815,7 @@ export default function DirectorCamera() {
                 color={instruction?.ready ? theme.color.success : theme.color.brand}
               />
             )}
-            <Text style={styles.instrText} numberOfLines={1}>{movementLabel || t('hold_camera_steady')}</Text>
+            <Text style={styles.instrText} numberOfLines={2}>{instruction?.ready && instruction.text ? instruction.text : shotInstruction}</Text>
             <Pressable onPress={requestDirection} disabled={directionBusy || recording} testID="camera-refresh-direction">
               <Ionicons name="refresh" size={20} color={directionBusy ? theme.color.onSurface3 : '#fff'} />
             </Pressable>

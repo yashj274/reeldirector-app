@@ -48,13 +48,57 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(sleep.call_count, 2)
 
     def test_storyboard_fallback_matches_requested_duration(self):
-        shots = server.fallback_storyboard({
+        _, shots = server.fallback_storyboard({
             "duration_seconds": 45, "shoot_type": "real_estate", "mood": "luxury",
         })
         self.assertGreaterEqual(len(shots), 4)
         self.assertLessEqual(len(shots), 8)
         self.assertAlmostEqual(sum(shot["duration_seconds"] for shot in shots), 45, places=1)
         self.assertTrue(all(shot["direction"] and shot["status"] == "pending" for shot in shots))
+
+    def test_structured_storyboard_maps_to_compatible_shot_fields(self):
+        source = [{
+            "title": f"Shot {index + 1}", "description": "Show the subject clearly.",
+            "purpose": ("hook", "detail", "action", "cta")[index],
+            "shotType": "close_up", "duration": 2, "cameraMovement": "dolly_in",
+            "instruction": "Move closer slowly.", "voiceover": "", "onScreenText": "",
+        } for index in range(4)]
+        shots = server.normalise_storyboard(source)
+
+        self.assertEqual(shots[0]["shotNumber"], 1)
+        self.assertEqual(shots[0]["index"], 0)
+        self.assertEqual(shots[0]["camera_movement"], "dolly_in")
+        self.assertEqual(shots[0]["duration_seconds"], 2)
+        self.assertEqual(shots[-1]["purpose"], "cta")
+
+    def test_storyboard_endpoint_preserves_valid_existing_plan_on_ai_failure(self):
+        old_shots = [{
+            "index": index, "title": f"Shot {index + 1}", "description": "A saved shot.",
+            "camera_movement": "static", "shot_size": "wide", "duration_seconds": 3,
+            "direction": "Hold still.", "status": "captured",
+        } for index in range(4)]
+        doc = {
+            "id": "p", "user_id": "u", "title": "Home tour", "shoot_type": "real_estate",
+            "purpose": "Show the home", "mood": "luxury", "style": "luxury", "platform": "instagram_reel",
+            "duration_seconds": 12, "audience": "", "storyboard": old_shots,
+            "storyboard_ai_generated": True, "script": "Saved concept.",
+        }
+
+        async def fake_project(*_args):
+            return doc.copy()
+
+        async def unavailable_ai(*_args, **_kwargs):
+            raise RuntimeError("Gemini is temporarily unavailable")
+
+        with patch.object(server, "fetch_project", fake_project), \
+             patch.object(server, "chat_once", unavailable_ai), \
+             patch.object(server, "save_project") as save_doc:
+            result = asyncio.run(server.generate_storyboard("p", user={"id": "u"}))
+
+        self.assertTrue(result["preserved_existing"])
+        self.assertEqual(result["storyboard"], old_shots)
+        self.assertEqual(result["script"], "Saved concept.")
+        save_doc.assert_not_called()
 
     def test_storyboard_endpoint_persists_fallback_when_ai_is_unavailable(self):
         doc = {

@@ -4,7 +4,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { clearAuth, getUser } from '@/src/api';
+import { clearAuth, getUser, getCreatorSkillLevel, setCreatorSkillLevel, CreatorSkillLevel } from '@/src/api';
 import { theme } from '@/src/theme';
 import { useT } from '@/src/i18n';
 
@@ -12,8 +12,24 @@ export default function Profile() {
   const t = useT();
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
+  const [skill, setSkill] = useState<CreatorSkillLevel>('beginner');
+  const [skillSaving, setSkillSaving] = useState(false);
+  const [skillError, setSkillError] = useState('');
 
-  useEffect(() => { getUser().then(setUser); }, []);
+  useEffect(() => {
+    void Promise.all([getUser(), getCreatorSkillLevel()]).then(([profile, level]) => {
+      setUser(profile);
+      setSkill(level);
+    });
+  }, []);
+
+  const saveSkill = async (level: CreatorSkillLevel) => {
+    setSkillSaving(true);
+    setSkillError('');
+    try { await setCreatorSkillLevel(level); setSkill(level); }
+    catch (error: any) { setSkillError(error?.message || 'Could not save this preference. Try again.'); }
+    finally { setSkillSaving(false); }
+  };
 
   const logout = async () => {
     await clearAuth();
@@ -49,6 +65,21 @@ export default function Profile() {
           <View style={styles.list}>
             {row('language-outline', t('language'), 'profile-language', () => router.push('/settings/language'))}
             {row('color-palette-outline', t('editing_style'), 'profile-editing-style')}
+          </View>
+          <View style={styles.skillPicker}>
+            <Text style={styles.skillTitle}>{t('creator_skill_level')}</Text>
+            <Text style={styles.skillHelp}>{t('skill_help')}</Text>
+            <View style={styles.skillOptions}>
+              {(['beginner', 'creator', 'pro'] as CreatorSkillLevel[]).map((level) => (
+                <Pressable key={level} onPress={() => void saveSkill(level)} disabled={skillSaving}
+                  style={[styles.skillOption, skill === level && styles.skillOptionOn]}
+                  accessibilityRole="button" accessibilityState={{ selected: skill === level, disabled: skillSaving }}
+                  testID={`profile-skill-${level}`}>
+                  <Text style={[styles.skillOptionText, skill === level && styles.skillOptionTextOn]}>{t(level)}</Text>
+                </Pressable>
+              ))}
+            </View>
+            {!!skillError && <Text style={styles.skillError} accessibilityRole="alert">{skillError}</Text>}
           </View>
 
           <Text style={styles.section}>{t('account')}</Text>
@@ -89,6 +120,15 @@ const styles = StyleSheet.create({
   planText: { color: theme.color.brand, fontSize: 10, fontWeight: '700', letterSpacing: 1 },
   section: { color: theme.color.onSurface3, fontSize: 12, marginBottom: 8, marginLeft: 4, textTransform: 'uppercase', letterSpacing: 1 },
   list: { borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border, marginBottom: 24, overflow: 'hidden' },
+  skillPicker: { marginTop: -12, marginBottom: 24, padding: 16, borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border },
+  skillTitle: { color: theme.color.onSurface, fontSize: 14, fontWeight: '700' },
+  skillHelp: { color: theme.color.onSurface3, fontSize: 12, marginTop: 4 },
+  skillOptions: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  skillOption: { flex: 1, minHeight: 40, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.color.border, alignItems: 'center', justifyContent: 'center' },
+  skillOptionOn: { borderColor: theme.color.brand, backgroundColor: theme.color.brandTint },
+  skillOptionText: { color: theme.color.onSurface2, fontSize: 13, fontWeight: '600' },
+  skillOptionTextOn: { color: theme.color.brand },
+  skillError: { color: theme.color.error, marginTop: 8, fontSize: 12 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 0.5, borderBottomColor: theme.color.divider },
   rowText: { flex: 1, color: theme.color.onSurface, fontSize: 15 },
   logout: { marginTop: 20, height: 52, borderRadius: theme.radius.md, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: theme.color.border },
