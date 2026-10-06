@@ -30,6 +30,11 @@ export default function Scan() {
   const [result, setResult] = useState<any>(null);
   const [project, setProject] = useState<any>(null);
   const [scanError, setScanError] = useState('');
+  const visibleElements = [...new Set([
+    ...(Array.isArray(result?.focus_elements) ? result.focus_elements.map((item: any) => typeof item === 'string' ? item : item?.name) : []),
+    ...(Array.isArray(result?.objects) ? result.objects : []),
+    ...(Array.isArray(result?.subjects) ? result.subjects : []),
+  ].map((name) => String(name || '').trim()).filter(Boolean))].slice(0, 5);
   const scanActiveRef = useRef(false);
   const scanFramesRef = useRef<string[]>([]);
   const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -174,6 +179,10 @@ export default function Scan() {
                 <Text style={styles.resTitle}>{t('scene_analyzed')}</Text>
                 {!project?.storyboard?.length && <Text style={styles.scanExplain}>{t('scan_explainer')}</Text>}
                 <Text style={styles.resSummary}>{result.summary}</Text>
+                {!!visibleElements.length && <>
+                  <Text style={styles.resSection}>{t('scene_elements')}</Text>
+                  <Text style={styles.tip}>{visibleElements.join(' · ')}</Text>
+                </>}
 
                 <View style={styles.scores}>
                   <ScoreBar label={t('lighting')} value={result.lighting_quality_score} />

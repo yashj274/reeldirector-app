@@ -12,6 +12,15 @@ import { theme } from '@/src/theme';
 import { ClipVideoPreview } from '@/src/ClipVideoPreview';
 import { useT } from '@/src/i18n';
 
+function sceneElements(sceneMap: any): string[] {
+  const values = [
+    ...(Array.isArray(sceneMap?.focus_elements) ? sceneMap.focus_elements.map((item: any) => typeof item === 'string' ? item : item?.name) : []),
+    ...(Array.isArray(sceneMap?.objects) ? sceneMap.objects : []),
+    ...(Array.isArray(sceneMap?.subjects) ? sceneMap.subjects : []),
+  ];
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 5);
+}
+
 export default function ProjectDetail() {
   const t = useT();
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -199,6 +208,11 @@ export default function ProjectDetail() {
                 <View style={styles.scanCard}>
                   <Text style={styles.scanLabel}>{t('scene_scan_label')}</Text>
                   <Text style={styles.scanSummary}>{proj.scene_map.summary}</Text>
+                  {!!sceneElements(proj.scene_map).length && (
+                    <Text style={[styles.scanSummary, { color: theme.color.onSurface2 }]}>
+                      {t('scene_elements')}: {sceneElements(proj.scene_map).join(' · ')}
+                    </Text>
+                  )}
                   {proj.scene_map.ai_generated === false && <Text style={styles.scanFallback}>{t('scan_fallback')}</Text>}
                 </View>
               )}

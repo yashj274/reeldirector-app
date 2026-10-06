@@ -373,7 +373,7 @@ async function rememberCreatorStyleChoice(project: any) {
 }
 
 export type DirectorCommand = 'move_left' | 'move_right' | 'move_forward' | 'move_backward' | 'tilt_up' | 'tilt_down' | 'hold_steady' | 'subject_left' | 'subject_right' | 'improve_lighting' | 'ready_to_record' | 'start_recording' | 'stop_recording';
-export type DirectorGuidance = { command: DirectorCommand; message: string; ready: boolean; confidence: number };
+export type DirectorGuidance = { command: DirectorCommand; message: string; ready: boolean; confidence: number; personalized?: boolean };
 
 function directorCommand(raw: any): DirectorCommand {
   if (raw?.ready) return 'ready_to_record';
@@ -860,6 +860,7 @@ export const api = {
       return {
         command: directorCommand(raw), message: String(raw?.instruction || 'Hold camera steady'),
         ready: !!raw?.ready, confidence: Math.max(0, Math.min(100, Number(raw?.confidence) || 0)),
+        personalized: raw?.personalized !== false,
       };
     } catch (error) {
       logBeta('ai_request', 'failed');

@@ -154,6 +154,7 @@ export default function DirectorCamera() {
   const webChunksRef = useRef<Blob[]>([]);
   const stoppingRecording = useRef(false);
   const directionPending = useRef(false);
+  const autoDirectedShot = useRef('');
   const nativeLensFacing = useRef<'back' | 'front' | null>(null);
 
   const [project, setProject] = useState<any>(null);
@@ -394,16 +395,30 @@ export default function DirectorCamera() {
     try {
       const imageBase64 = await captureFrame();
       const r = await api.director(id, shotIndex, imageBase64);
-      setInstruction(r);
-      setCameraError(null);
+      if (shotIndexRef.current === shotIndex) {
+        setInstruction(r);
+        setCameraError(null);
+      }
     } catch (e: any) {
-      setInstruction({ command: 'hold_steady', message: shotObj.direction?.slice(0, 40) || 'Hold steady', confidence: 0, ready: false });
-      if (e.message?.includes('not configured') || e.message?.includes('not connected')) setCameraError(e.message);
+      if (shotIndexRef.current === shotIndex) {
+        setInstruction({ command: 'hold_steady', message: shotObj.direction?.slice(0, 40) || 'Hold steady', confidence: 0, ready: false, personalized: false });
+        if (e.message?.includes('not configured') || e.message?.includes('not connected')) setCameraError(e.message);
+      }
     } finally {
       directionPending.current = false;
       setDirectionBusy(false);
     }
   }, [id, shotIndex, shotObj, cameraReady, captureFrame]);
+
+  // Give one frame-specific direction automatically when each shot is ready.
+  // The refresh control remains available for another direction without polling Gemini.
+  useEffect(() => {
+    if (!id || !shotObj || !cameraReady || directionPending.current) return;
+    const key = `${id}:${shotIndex}`;
+    if (autoDirectedShot.current === key) return;
+    autoDirectedShot.current = key;
+    void requestDirection();
+  }, [id, shotIndex, shotObj, cameraReady, directionBusy, requestDirection]);
 
   useEffect(() => {
     setInstruction(null);
@@ -820,8 +835,13 @@ export default function DirectorCamera() {
                 color={instruction?.ready ? theme.color.success : theme.color.brand}
               />
             )}
-            <Text style={styles.instrText} numberOfLines={2}>{instruction?.message || shotInstruction}</Text>
-            <Pressable onPress={requestDirection} disabled={directionBusy || recording} testID="camera-refresh-direction">
+            <View style={styles.instrCopy}>
+              <Text style={styles.instrLabel}>{instruction?.personalized === false ? t('shot_plan') : t('live_director')}</Text>
+              <Text style={styles.instrText} numberOfLines={2}>
+                {instruction?.message || shotInstruction || (directionBusy ? t('director_checking') : '')}
+              </Text>
+            </View>
+            <Pressable onPress={requestDirection} disabled={directionBusy || recording} accessibilityLabel={t('director_refresh')} testID="camera-refresh-direction">
               <Ionicons name="refresh" size={20} color={directionBusy ? theme.color.onSurface3 : '#fff'} />
             </Pressable>
           </View>
@@ -1048,8 +1068,10 @@ const styles = StyleSheet.create({
   shotPill: { flex: 1, height: 52, borderRadius: theme.radius.md, overflow: 'hidden', paddingHorizontal: 14, justifyContent: 'center' },
   shotPillLabel: { color: theme.color.brand, fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
   shotPillTitle: { color: '#fff', fontSize: 14, fontWeight: '700', marginTop: 2 },
-  instrWrap: { marginHorizontal: 16, marginTop: 14, minHeight: 56, borderRadius: theme.radius.md, overflow: 'hidden', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, gap: 12 },
-  instrText: { flex: 1, color: '#fff', fontSize: 16, fontWeight: '700' },
+  instrWrap: { marginHorizontal: 16, marginTop: 14, minHeight: 62, borderRadius: theme.radius.md, overflow: 'hidden', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, gap: 12 },
+  instrCopy: { flex: 1, gap: 2 },
+  instrLabel: { color: theme.color.brand, fontSize: 9, fontWeight: '900', letterSpacing: 1.1 },
+  instrText: { color: '#fff', fontSize: 15, lineHeight: 19, fontWeight: '700' },
   recWrap: { padding: 20, alignItems: 'center', gap: 12 },
   timer: { color: '#fff', fontSize: 13, fontWeight: '600', backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: theme.radius.pill },
   recBtnOuter: { width: 84, height: 84, borderRadius: 42, borderWidth: 4, borderColor: '#fff', alignItems: 'center', justifyContent: 'center' },

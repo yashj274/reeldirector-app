@@ -824,7 +824,7 @@ UI_TRANSLATION_SOURCE = {
     "purpose_placeholder": "Describe your project and we'll shape the perfect reel for it…",
     "purpose_required": "Add a little more detail so the AI can plan your story (at least 10 characters).",
     "target_audience": "Target audience (optional)", "create_project": "Create project",
-    "custom_script": "Your custom script", "scene_scan_label": "AI environment scan",
+    "custom_script": "Your custom script", "scene_scan_label": "AI environment scan", "scene_elements": "Seen in your space",
     "script_and_shots": "Custom script and shots", "storyboard": "Storyboard", "shots_progress": "shots",
     "no_purpose": "No purpose set", "generate_storyboard": "Generate AI storyboard",
     "directing_your_shoot": "Directing your shoot…", "preview_final_reel": "Preview final reel",
@@ -952,7 +952,9 @@ UI_TRANSLATION_SOURCE = {
     "scene_analyzed": "Scene analyzed", "lighting": "Lighting", "composition": "Composition",
     "suggested_shots": "Suggested shots", "scan_again": "Scan again", "generate_script": "Use scan & write my script",
     "skip_scan": "Continue without a scan", "start_shooting": "Start shooting", "generating_story": "Writing your custom story…",
-    "move_guide": "Movement guide", "flashlight": "Flashlight", "brightness": "Brightness",
+    "move_guide": "Movement guide", "live_director": "Live director", "director_checking": "Finding the best shot in this scene…",
+    "director_refresh": "Get another direction",
+    "flashlight": "Flashlight", "brightness": "Brightness",
     "zoom": "Zoom", "zoom_unavailable": "This camera cannot change zoom right now.",
     "brightness_up": "Increase brightness", "brightness_down": "Decrease brightness",
     "blur": "Blur", "exposure": "Exposure", "framing": "Framing", "stability": "Stability",
@@ -1005,7 +1007,7 @@ STORYBOARD_SYSTEM = """You are a culturally informed film director and short-for
 Return ONLY one JSON object with `title`, `concept`, `style`, `goal`, `totalDuration`, `hook`, `cta`, and `shots`. Return 4 to 8 shots. Each shot includes `shotNumber` (1-based), `purpose` (hook/detail/action/hero/cta), `shotType`, `duration`, `cameraMovement`, `animationTemplate`, `subjectPosition`, `cameraStart`, `cameraEnd`, `instruction`, `voiceover`, `onScreenText`, and `difficulty` (easy/medium/advanced), plus `title` and `description`.
 Use these movements: static, pan_left, pan_right, tilt_up, tilt_down, dolly_in, dolly_out, tracking, orbit, reveal, handheld. Use these shot types: extreme_wide, wide, medium, close_up, extreme_close_up. Durations must be 1.5 to 12 seconds and add up close to the requested total.
 Keep each on-camera `instruction` to one simple sentence of 8-12 words or fewer, in the requested language. Beginner instructions use everyday words and no camera jargon. Creator instructions may add one framing or movement detail. Pro instructions may use concise filming terminology. Keep descriptions to one sentence. Voiceover and on-screen text are optional; use empty strings when they do not help the story.
-No prose outside JSON. Be specific to the user's purpose and audience. Infer cultural meaning from clear event names (for example, a mehndi is commonly a South Asian pre-wedding celebration centered on henna art, close family moments, music, and ritual); use that understanding respectfully, adapt details to the supplied scene scan, and never invent people or rituals that the user did not describe or the image does not support. Do not replace the user's event with a generic template."""
+No prose outside JSON. Be specific to the user's purpose and audience. Infer cultural meaning from clear event names (for example, a mehndi is commonly a South Asian pre-wedding celebration centered on henna art, close family moments, music, and ritual); use that understanding respectfully, adapt details to the supplied scene scan, and never invent people or rituals that the user did not describe or the image does not support. Do not replace the user's event with a generic template. When a reliable scene scan is present, choose real visible subjects or objects that fit the user's story and name them directly in the relevant shot title, description, or filming instruction. Make each shot tell the beginner what to point at and, when useful, where to stand or how to move. Avoid generic phrases such as “film a detail” when a specific scanned element is available."""
 
 STORY_PHASES = ("hook", "detail", "action", "hero", "cta")
 
@@ -1084,6 +1086,18 @@ def fallback_storyboard(doc: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]
     subject = purpose if len(purpose) <= 92 else purpose[:89].rsplit(" ", 1)[0] + "…"
     scan = doc.get("scene_map") or {}
     scan_summary = str(scan.get("summary") or "").strip() if scan.get("ai_generated", True) else ""
+    scene_elements: List[str] = []
+    if scan.get("ai_generated", True):
+        scanned = scan.get("focus_elements") or []
+        for item in scanned:
+            name = item.get("name") if isinstance(item, dict) else item
+            if isinstance(name, str) and name.strip():
+                scene_elements.append(name.strip())
+        for field in ("objects", "subjects"):
+            values = scan.get(field) or []
+            if isinstance(values, list):
+                scene_elements.extend(name.strip() for name in values if isinstance(name, str) and name.strip())
+        scene_elements = list(dict.fromkeys(scene_elements))[:5]
     scan_context = f"Use the scanned setting ({scan_summary}) as the visual anchor. " if scan_summary else "Use only details that are actually visible in the filming environment. "
     mood = (doc.get("mood") or doc.get("style") or "cinematic").strip()
     lower = f"{title} {purpose} {doc.get('shoot_type') or ''}".casefold()
@@ -1157,6 +1171,12 @@ def fallback_storyboard(doc: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]
     shots = []
     for index in range(count):
         title, description, movement, size, direction = blueprints[index]
+        if index > 0 and scene_elements:
+            element = scene_elements[(index - 1) % len(scene_elements)]
+            visible_name = element if element.lower().startswith(("a ", "an ", "the ")) else f"the {element}"
+            title = f"{title}: {element}"
+            description = f"Feature {visible_name}, identified in the scene scan. {description}"
+            direction = f"Stand beside {visible_name}; move closer."
         shots.append({
             "index": index,
             "title": f"{title} · {subject[:40]}",
@@ -1208,7 +1228,7 @@ Creator skill level: {user.get('creator_skill_level', 'beginner')}
 Environment scan: {scene_context}
 
 Use the title and creator's explanation as the source of truth. Notice cultural/event references and make the storytelling, shot ideas, props/details, and narration fit that occasion. Use the environment scan to choose subjects, backgrounds, lighting, and feasible framing; never claim a person or object is present unless the scan supports it. Return the complete structured storyboard with title, concept, style, goal, totalDuration, hook, cta, and 4 to 8 shots whose durations add up close to {doc['duration_seconds']} seconds.
-Make it practical to film on a phone and tailored to {doc['platform']}. Match the creator skill level in every short instruction. Use the stored creator style only as a light preference when it fits this description and setting."""
+Make it practical to film on a phone and tailored to {doc['platform']}. Match the creator skill level in every short instruction. Use the stored creator style only as a light preference when it fits this description and setting. For each shot, clearly name the visible subject or object the person should film whenever the scan supplies a suitable one. Give simple, specific actions such as “Stand beside the statue and move closer” or “Frame the chair from its left side,” translated naturally into {language}. Vary the chosen scanned elements across the reel when the scene supports it. Do not claim an element exists solely because the creator mentioned it; the scan must support it."""
 
     ai_generated = True
     script = ""
@@ -1286,6 +1306,7 @@ Compare all supplied frames as one place, then return ONLY a compact JSON object
 - composition_score (0-100)
 - subjects (array of short strings, what/who is in view)
 - objects (array of short strings, notable objects)
+- focus_elements (array of up to 3 objects with `name` and `position` (left/center/right/foreground/background/unclear)); prefer distinctive visible elements that could make a personalized shot
 - background (short string, e.g., "cluttered", "clean", "urban", "nature")
 - best_time_of_day (string)
 - recommended_style (one of: cinematic, luxury, minimal, action, editorial, warm)
@@ -1347,14 +1368,14 @@ Keep event and cultural context in mind, but describe only visual evidence in th
 
 
 # ---------------- AI: Director Instruction ----------------
-DIRECTOR_SYSTEM = """You are a live film director giving a single, ultra-short instruction (max 6 words)
-to the person filming right now. Look at the current camera frame and the requested shot.
+DIRECTOR_SYSTEM = """You are a live film director giving one clear, practical instruction (up to 10 words)
+to the person filming right now. Look at the current camera frame, the requested shot, and the scan of this exact place.
 Return ONLY a compact JSON object:
-- instruction (max 6 words, like "Step left, tilt phone up")
+- instruction (up to 10 words; name the visible target when possible and say where to stand or how to move, e.g. "Stand beside the statue; move closer" or "Frame the chair from its left side")
 - arrow_direction (one of: none, up, down, left, right, forward, back, rotate_cw, rotate_ccw)
 - ready (boolean, true if the frame already matches the desired shot well)
 - confidence (0-100)
-No prose. No markdown."""
+No prose. No markdown. Prefer a specific, scanned element that fits the requested story over generic camera advice. Use its scanned position when helpful. Only name an element that is supported by both the scan and the current frame; if the scan is empty, direct the user using only what is visible in the current frame. Give one instruction the user can act on immediately. Do not narrate the scan or repeat the shot description."""
 
 
 @api.post("/director/instruct")
@@ -1373,20 +1394,25 @@ Description: {shot['description']}
 Camera movement: {shot['camera_movement']}
 Shot size: {shot['shot_size']}
 Direction to person: {shot['direction']}
-Environment scan: {json.dumps(doc.get('scene_map') or {}, ensure_ascii=False)}
+Creator's video purpose: {doc.get('purpose') or doc.get('title')}
+Environment scan (visible subjects, objects and positions): {json.dumps(doc.get('scene_map') or {}, ensure_ascii=False)}
 Reply in {language}.
 
-Give the next short instruction."""
+Give the next short, scene-specific instruction. First choose the most relevant visible element from the scan and confirm it appears in this camera frame. Tell the person where to stand or how to frame/move so that element makes a strong shot. If no scanned element fits, name only an element clearly visible in the current frame."""
     try:
         images = [body.image_base64] if body.image_base64 else []
-        raw = await chat_once(DIRECTOR_SYSTEM, prompt, images)
+        raw = await chat_once(
+            DIRECTOR_SYSTEM, prompt, images, max_output_tokens=128,
+            thinking_level="minimal", max_attempts=1, timeout=(4, 8),
+        )
         data = extract_json(raw)
         if not isinstance(data, dict):
             raise ValueError("bad instruct")
+        data["personalized"] = True
     except Exception as e:
         log.warning("director fail: %s", e)
         data = {"instruction": shot["direction"][:40], "arrow_direction": "none",
-                "ready": False, "confidence": 0}
+                "ready": False, "confidence": 0, "personalized": False}
     return data
 
 
