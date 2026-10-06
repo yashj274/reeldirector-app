@@ -165,7 +165,7 @@ async function request(path: string, opts: RequestInit = {}): Promise<any> {
   try {
     res = await fetch(`${BASE}/api${path}`, { ...opts, headers });
   } catch {
-    throw new Error(`Can’t reach the ReelDirector service at ${BASE}. Start the backend and check REELDIRECTOR_API_URL in frontend/.env.local.`);
+    throw new Error(`The ReelDirector service at ${BASE} did not respond. It may be waking up; check your connection and try again shortly.`);
   }
   const text = await res.text();
   let data: any = null;
@@ -502,6 +502,7 @@ export const api = {
     if (typeof exportOptions.original_volume === 'number' && exportOptions.original_volume > 1) {
       exportOptions.original_volume /= 100;
     }
+    await warmBackend();
     const result = await request(`/projects/${id}/export`, {
       method: 'POST', body: JSON.stringify(exportOptions),
     });
