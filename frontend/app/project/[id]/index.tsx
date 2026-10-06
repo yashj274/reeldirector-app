@@ -18,6 +18,7 @@ export default function ProjectDetail() {
   const router = useRouter();
   const [proj, setProj] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [projectLoadError, setProjectLoadError] = useState('');
   const [generating, setGenerating] = useState(false);
   const [startingShooting, setStartingShooting] = useState(false);
   const [storyboardNotice, setStoryboardNotice] = useState('');
@@ -26,6 +27,7 @@ export default function ProjectDetail() {
 
   const load = useCallback(async () => {
     if (!id) return;
+    setProjectLoadError('');
     try {
       const project = await api.getProject(id);
       setProj(project);
@@ -33,9 +35,12 @@ export default function ProjectDetail() {
       const next = (project.storyboard || []).findIndex((shot: any, index: number) =>
         !clips.has(index) || shot.status === 'retake');
       if (next >= 0) setFocusedShotIndex(next);
-    } catch (e) { console.warn(e); }
+    } catch (e: any) {
+      console.warn(e);
+      setProjectLoadError(e?.message || t('project_load_failed'));
+    }
     finally { setLoading(false); }
-  }, [id]);
+  }, [id, t]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -43,7 +48,7 @@ export default function ProjectDetail() {
     if (!id) return;
     setGenerating(true);
     try {
-      const result = await api.storyboard(id);
+      const result = await api.storyboard(id, true);
       await load();
       setStoryboardNotice(result?.preserved_existing
         ? t('storyboard_preserved')
@@ -89,7 +94,7 @@ export default function ProjectDetail() {
     if (needsCompletePlan) {
       setStartingShooting(true);
       try {
-        await api.storyboard(id);
+        await api.storyboard(id, true);
         targetProject = await api.getProject(id);
         setProj(targetProject);
       } catch (error: any) {
@@ -111,10 +116,21 @@ export default function ProjectDetail() {
     router.push({ pathname: '/project/[id]/camera', params: { id, shot: String(focused >= 0 ? focused : Math.max(0, pending)) } });
   };
 
-  if (loading || !proj) {
+  if (loading && !proj) {
     return (
       <View style={[styles.root, { alignItems: 'center', justifyContent: 'center' }]}>
         <ActivityIndicator color={theme.color.brand} />
+      </View>
+    );
+  }
+  if (!proj) {
+    return (
+      <View style={[styles.root, { alignItems: 'center', justifyContent: 'center', padding: 24 }]}>
+        <Text style={styles.projectLoadError}>{projectLoadError || 'Could not open this project.'}</Text>
+        <Pressable style={styles.retryStoryboard} onPress={() => void load()} testID="project-load-retry">
+          <Ionicons name="refresh" size={16} color={theme.color.brand} />
+          <Text style={styles.retryStoryboardText}>{t('try_again')}</Text>
+        </Pressable>
       </View>
     );
   }
@@ -135,6 +151,21 @@ export default function ProjectDetail() {
         </View>
 
         <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+          {proj.local_recovery && (
+            <View style={styles.recoveryNotice} testID="project-local-recovery">
+              <Text style={styles.recoveryText}>
+                {proj.local_sync_conflict
+                  ? t('local_recovery_conflict')
+                  : proj.local_sync_pending ? t('local_recovery_pending') : t('local_recovery_offline')}
+              </Text>
+              {!proj.local_sync_conflict && (
+                <Pressable onPress={() => void load()} style={styles.recoveryRetry} testID="project-sync-retry">
+                  <Ionicons name="refresh" size={15} color={theme.color.brand} />
+                  <Text style={styles.retryStoryboardText}>{t('sync_try_again')}</Text>
+                </Pressable>
+              )}
+            </View>
+          )}
           <View style={styles.metaCard}>
             <Text style={styles.metaLabel}>{proj.shoot_type.toUpperCase()} · {proj.style.toUpperCase()}</Text>
             <Text style={styles.metaTitle}>{proj.mood} · {proj.duration_seconds}s</Text>
@@ -318,6 +349,10 @@ export default function ProjectDetail() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.color.surface },
+  projectLoadError: { color: theme.color.onSurface2, textAlign: 'center', fontSize: 14, lineHeight: 21, marginBottom: 12 },
+  recoveryNotice: { padding: 12, marginBottom: 14, borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border, gap: 8 },
+  recoveryText: { color: theme.color.onSurface2, fontSize: 12, lineHeight: 17 },
+  recoveryRetry: { minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start' },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 8, paddingBottom: 12, gap: 12 },
   hdrTitle: { flex: 1, color: theme.color.onSurface, fontSize: 17, fontWeight: '700' },
   metaCard: { padding: 20, borderRadius: theme.radius.lg, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border, marginBottom: 20 },

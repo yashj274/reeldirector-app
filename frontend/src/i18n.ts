@@ -152,6 +152,11 @@ const STRINGS: Record<string, Record<string, string>> = {
     your_shot: 'Your shot · watch it back', retake: 'Retake', next_shot: 'Next shot', finish_edit: 'Finish & edit',
     camera_movement_unavailable: 'This browser cannot control the flashlight on this device.',
     translation_loading: 'Preparing your language…', translation_failed: 'Some labels may remain in English while offline.',
+    local_recovery_pending: 'Your latest changes are saved on this device and will sync when you are back online.',
+    local_recovery_offline: 'Showing the copy saved on this device. Reconnect to refresh your project and clips.',
+    local_recovery_conflict: 'This project changed on another device. Your latest changes are safe on this device but need help to sync.',
+    project_load_failed: 'Could not open this project. Check your connection and try again.',
+    sync_try_again: 'Try again',
   },
   hi: {
     welcome_back: 'वापस स्वागत है', new_reel: 'नया रील', dashboard: 'होम',
@@ -262,6 +267,8 @@ const listeners = new Set<() => void>();
 const notify = () => listeners.forEach((listener) => listener());
 const fallbackBackend = (Constants.expoConfig?.extra?.backendUrl || '').replace(/\/+$/, '');
 const translationRequests = new Map<string, Promise<void>>();
+const translationAttempts = new Set<string>();
+const TRANSLATION_CACHE_VERSION = 4;
 
 function fetchTranslations(code: string) {
   const active = translationRequests.get(code);
@@ -273,11 +280,20 @@ function fetchTranslations(code: string) {
 
 async function fetchTranslationsOnce(code: string) {
   if (code === 'en') { dynamicStrings = {}; notify(); return; }
-  const cache = await AsyncStorage.getItem(`reeldirector.translations.${code}`);
+  const cacheKey = `reeldirector.translations.v${TRANSLATION_CACHE_VERSION}.${code}`;
+  const cache = await AsyncStorage.getItem(cacheKey);
   if (cache) {
-    try { if (currentLang === code) { dynamicStrings = JSON.parse(cache); notify(); } } catch { /* Ignore stale translation cache. */ }
+    try {
+      const translated = JSON.parse(cache);
+      if (translated && typeof translated === 'object' && Object.keys(translated).length) {
+        if (currentLang === code) { dynamicStrings = translated; notify(); }
+        return;
+      }
+    } catch { /* Replace a stale or malformed translation cache. */ }
+    await AsyncStorage.removeItem(cacheKey).catch(() => {});
   }
-  if (!fallbackBackend) return;
+  if (!fallbackBackend || translationAttempts.has(code)) return;
+  translationAttempts.add(code);
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60_000);
@@ -287,7 +303,7 @@ async function fetchTranslationsOnce(code: string) {
     const body = await response.json();
     if (body?.translations && typeof body.translations === 'object') {
       const translated = body.translations as Record<string, string>;
-      await AsyncStorage.setItem(`reeldirector.translations.${code}`, JSON.stringify(translated));
+      await AsyncStorage.setItem(cacheKey, JSON.stringify(translated));
       if (currentLang === code) { dynamicStrings = translated; notify(); }
     }
   } catch { /* Cached or built-in text stays available offline. */ }
@@ -304,6 +320,7 @@ export async function setLanguage(code: string) {
   dynamicStrings = STRINGS[code] || {};
   await AsyncStorage.setItem(LANG_KEY, code);
   notify();
+  translationAttempts.delete(code);
   void fetchTranslations(code);
 }
 export async function isOnboarded(): Promise<boolean> {

@@ -30,13 +30,106 @@ const BASE = getBackendBase();
 const TOKEN_KEY = 'reeldirector.token';
 const USER_KEY = 'reeldirector.user';
 const CREATOR_SKILL_KEY = 'reeldirector.creatorSkill';
+const PROJECT_CACHE_PREFIX = 'reeldirector.project.';
+const PROJECT_INDEX_PREFIX = 'reeldirector.projects.';
+const PENDING_CREATE_PREFIX = 'reeldirector.project-create.';
+const BACKEND_WARM_KEY = 'reeldirector.backend.lastHealthy';
+const MAX_CACHED_PROJECTS = 10;
 export type CreatorSkillLevel = 'beginner' | 'creator' | 'pro';
 const isCreatorSkillLevel = (value: unknown): value is CreatorSkillLevel =>
   value === 'beginner' || value === 'creator' || value === 'pro';
 const SIGNED_URL_CACHE_TTL_MS = 50 * 60 * 1000;
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
-let backendWarmupAttemptedAt = 0;
+let backendHealthyAt = 0;
 let backendWarmupRequest: Promise<void> | null = null;
+const pendingProjectCreates = new Map<string, Promise<any>>();
+
+type CachedProject = { project: any; pending: boolean; remoteUpdatedAt: string | null; conflict?: boolean };
+
+function projectCacheKey(userId: string, projectId: string) {
+  return `${PROJECT_CACHE_PREFIX}${userId}.${projectId}`;
+}
+
+function withoutTemporaryUrls(project: any) {
+  const copy = JSON.parse(JSON.stringify(project));
+  delete copy.local_recovery;
+  delete copy.local_sync_pending;
+  delete copy.local_sync_conflict;
+  if (copy.export) delete copy.export.url;
+  if (copy.export) delete copy.export.thumbnail_url;
+  delete copy.export_url;
+  delete copy.thumbnail_url;
+  if (copy.soundtrack) delete copy.soundtrack.signed_url;
+  if (copy.voiceover) delete copy.voiceover.signed_url;
+  for (const clip of copy.clips || []) {
+    delete clip.video_url;
+    delete clip.frame_url;
+  }
+  return copy;
+}
+
+async function readCachedProject(userId: string, projectId: string): Promise<CachedProject | null> {
+  try {
+    const value = await AsyncStorage.getItem(projectCacheKey(userId, projectId));
+    if (!value) return null;
+    const parsed = JSON.parse(value);
+    // Older cache entries held only the project document.
+    return parsed?.project
+      ? parsed as CachedProject
+      : { project: parsed, pending: false, remoteUpdatedAt: parsed?.updated_at || null };
+  } catch {
+    return null;
+  }
+}
+
+async function rememberProject(userId: string, project: any, remoteUpdatedAt: string | null, pending = false, conflict = false) {
+  const clean = withoutTemporaryUrls(project);
+  try {
+    await AsyncStorage.setItem(projectCacheKey(userId, clean.id), JSON.stringify({
+      project: clean, pending, remoteUpdatedAt, conflict,
+    } satisfies CachedProject));
+    const indexKey = `${PROJECT_INDEX_PREFIX}${userId}`;
+    const ids = JSON.parse(await AsyncStorage.getItem(indexKey) || '[]') as string[];
+    const nextIds = [clean.id, ...ids.filter((id) => id !== clean.id)].slice(0, MAX_CACHED_PROJECTS);
+    await AsyncStorage.setItem(indexKey, JSON.stringify(nextIds));
+    const staleIds = ids.filter((id) => !nextIds.includes(id));
+    if (staleIds.length) await AsyncStorage.multiRemove(staleIds.map((id) => projectCacheKey(userId, id)));
+    return true;
+  } catch (error) {
+    console.warn('Project recovery cache could not be updated:', error);
+    return false;
+  }
+}
+
+async function cachedProjects(userId: string) {
+  try {
+    const ids = JSON.parse(await AsyncStorage.getItem(`${PROJECT_INDEX_PREFIX}${userId}`) || '[]') as string[];
+    const entries = await Promise.all(ids.map((id) => readCachedProject(userId, id)));
+    return entries.flatMap((entry) => entry ? [{ ...entry.project, local_recovery: true }] : []);
+  } catch {
+    return [];
+  }
+}
+
+async function removeFromProjectIndex(userId: string, projectId: string) {
+  try {
+    const value = await AsyncStorage.getItem(`${PROJECT_INDEX_PREFIX}${userId}`);
+    const ids = JSON.parse(value || '[]') as string[];
+    await AsyncStorage.setItem(`${PROJECT_INDEX_PREFIX}${userId}`, JSON.stringify(ids.filter((id) => id !== projectId)));
+    await AsyncStorage.removeItem(projectCacheKey(userId, projectId));
+  } catch { /* The cloud deletion is still complete if local cleanup fails. */ }
+}
+
+function friendlyServiceError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  if (/429|rate.?limit|resource_exhausted|quota/i.test(message)) {
+    return new Error('AI is busy right now. Your project is safe; please try again in a moment.');
+  }
+  if (/failed to fetch|network request failed|load failed|networkerror|timed? ?out|502|503|504|did not respond/i.test(message)) {
+    return new Error('This service is taking longer to respond. Your saved progress is safe; please try again shortly.');
+  }
+  return error instanceof Error ? error : new Error('Something went wrong. Please try again.');
+}
 
 export function friendlyAuthError(error: unknown, action: 'sign in' | 'create account') {
   const message = error instanceof Error ? error.message : '';
@@ -145,19 +238,28 @@ async function signMediaPaths(paths: string[]) {
 async function warmBackend() {
   if (!BASE) return;
   if (backendWarmupRequest) return backendWarmupRequest;
-  if (Date.now() - backendWarmupAttemptedAt < 5 * 60 * 1000) return;
-  backendWarmupAttemptedAt = Date.now();
-  const controller = new AbortController();
-  // Render free services can take about a minute to wake; this wait stays in
-  // the background and lets the health request finish when the service is up.
-  const timeout = setTimeout(() => controller.abort(), 90000);
-  backendWarmupRequest = fetch(`${BASE}/`, { signal: controller.signal })
-    .then(() => undefined)
-    .catch(() => undefined)
-    .finally(() => {
-      clearTimeout(timeout);
-      backendWarmupRequest = null;
-    });
+  if (Date.now() - backendHealthyAt < 5 * 60 * 1000) return;
+  backendWarmupRequest = (async () => {
+    try {
+      const stored = JSON.parse(await AsyncStorage.getItem(BACKEND_WARM_KEY) || 'null');
+      if (stored?.base === BASE && stored?.at && Date.now() - stored.at >= 0 && Date.now() - stored.at < 5 * 60 * 1000) {
+        backendHealthyAt = stored.at;
+        return;
+      }
+    } catch { /* Warm the service if local storage is unavailable. */ }
+    const controller = new AbortController();
+    // Render free services can take about a minute to wake; this wait stays in
+    // the background and lets the health request finish when the service is up.
+    const timeout = setTimeout(() => controller.abort(), 90000);
+    try {
+      const response = await fetch(`${BASE}/`, { signal: controller.signal });
+      if (response.ok) {
+        backendHealthyAt = Date.now();
+        void AsyncStorage.setItem(BACKEND_WARM_KEY, JSON.stringify({ base: BASE, at: backendHealthyAt })).catch(() => {});
+      }
+    } catch { /* The next feature request can retry the health check. */ }
+    finally { clearTimeout(timeout); }
+  })().finally(() => { backendWarmupRequest = null; });
   return backendWarmupRequest;
 }
 
@@ -193,25 +295,65 @@ async function request(path: string, opts: RequestInit = {}): Promise<any> {
   try {
     res = await fetch(`${BASE}/api${path}`, { ...opts, headers });
   } catch {
-    throw new Error(`The ReelDirector service at ${BASE} did not respond. It may be waking up; check your connection and try again shortly.`);
+    throw friendlyServiceError('The service did not respond.');
   }
   const text = await res.text();
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!res.ok) {
     const msg = (data && (data.detail || data.message)) || `HTTP ${res.status}`;
-    throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    const message = typeof msg === 'string' ? msg : JSON.stringify(msg);
+    if (res.status === 429 || res.status >= 500) throw friendlyServiceError(message || `HTTP ${res.status}`);
+    throw new Error(message);
   }
   return data;
 }
 
 async function readProject(id: string) {
   const user = await currentUser();
-  const { data, error } = await getSupabase().from('projects').select('data')
-    .eq('id', id).eq('user_id', user.id).maybeSingle();
-  if (error) throw error;
-  if (!data?.data) throw new Error('Project not found');
+  const cached = await readCachedProject(user.id, id);
+  if (cached?.pending) {
+    try {
+      const { data: remote, error: readError } = await getSupabase().from('projects').select('data,updated_at')
+        .eq('id', id).eq('user_id', user.id).maybeSingle();
+      if (!readError && remote?.updated_at === cached.remoteUpdatedAt) {
+        const { data: saved, error: saveError } = await getSupabase().from('projects').update({
+          data: cached.project, updated_at: new Date().toISOString(),
+        }).eq('id', id).eq('user_id', user.id).eq('updated_at', cached.remoteUpdatedAt).select('updated_at').maybeSingle();
+        if (!saveError && saved?.updated_at) {
+          await rememberProject(user.id, cached.project, saved.updated_at);
+        }
+      } else if (!readError && remote && remote.data?.updated_at === cached.project.updated_at) {
+        // The write may have reached Supabase even if its response was lost.
+        await rememberProject(user.id, cached.project, remote.updated_at || null);
+      } else if (!readError) {
+        await rememberProject(user.id, cached.project, cached.remoteUpdatedAt, true, true);
+      }
+    } catch { /* Keep the local copy until the account service is available. */ }
+    const latestCache = await readCachedProject(user.id, id);
+    if (latestCache?.pending) return {
+      ...latestCache.project, local_recovery: true,
+      ...(latestCache.conflict ? { local_sync_conflict: true } : { local_sync_pending: true }),
+    };
+  }
+
+  let data: any;
+  try {
+    const result = await getSupabase().from('projects').select('data,updated_at')
+      .eq('id', id).eq('user_id', user.id).maybeSingle();
+    if (result.error) throw result.error;
+    data = result.data;
+    if (!data?.data) throw new Error('Project not found');
+  } catch (error) {
+    if (cached) return {
+      ...cached.project,
+      local_recovery: true,
+      ...(cached.pending ? cached.conflict ? { local_sync_conflict: true } : { local_sync_pending: true } : {}),
+    };
+    throw friendlyServiceError(error);
+  }
   const project = data.data;
+  await rememberProject(user.id, project, data.updated_at || project.updated_at || null);
   const assets: { path: string; apply: (url: string | null) => void }[] = [];
   if (project.export?.storage_path) assets.push({ path: project.export.storage_path, apply: (url) => { project.export.url = url; } });
   if (project.soundtrack?.storage_path) assets.push({ path: project.soundtrack.storage_path, apply: (url) => { project.soundtrack.signed_url = url; } });
@@ -221,19 +363,95 @@ async function readProject(id: string) {
     if (clip.frame_storage_path) assets.push({ path: clip.frame_storage_path, apply: (url) => { clip.frame_url = url; } });
   }
   if (assets.length) {
-    const urlByPath = await signMediaPaths(assets.map((asset) => asset.path));
-    for (const asset of assets) asset.apply(urlByPath.get(asset.path) || null);
+    try {
+      const urlByPath = await signMediaPaths(assets.map((asset) => asset.path));
+      for (const asset of assets) asset.apply(urlByPath.get(asset.path) || null);
+    } catch {
+      // Metadata is still useful when storage is briefly unavailable.
+      for (const asset of assets) asset.apply(null);
+    }
   }
   return project;
 }
 
 async function updateProjectData(project: any) {
   const user = await currentUser();
-  const { error } = await getSupabase().from('projects').update({
-    data: project,
-    updated_at: new Date().toISOString(),
-  }).eq('id', project.id).eq('user_id', user.id);
-  if (error) throw error;
+  const previous = await readCachedProject(user.id, project.id);
+  const baseRevision = previous?.remoteUpdatedAt || null;
+  const timestamp = new Date(Math.max(Date.now(), (Date.parse(baseRevision || '') || 0) + 1)).toISOString();
+  const projectToSave = { ...project, updated_at: timestamp };
+  const locallySaved = await rememberProject(user.id, projectToSave, baseRevision, true);
+  let update = getSupabase().from('projects').update({ data: withoutTemporaryUrls(projectToSave), updated_at: timestamp })
+    .eq('id', project.id).eq('user_id', user.id);
+  if (baseRevision) update = update.eq('updated_at', baseRevision) as typeof update;
+  let data: any = null;
+  let error: any = null;
+  try {
+    const result = await update.select('updated_at').maybeSingle();
+    data = result.data;
+    error = result.error;
+  } catch (saveError) {
+    error = saveError;
+  }
+  if (error || !data?.updated_at) {
+    if (locallySaved) {
+      const message = !error
+        ? 'This project changed elsewhere. Your latest changes are safe on this device, but could not sync automatically.'
+        : 'Your changes are saved on this device. Reopen this project when you are back online to sync them.';
+      const offline = new Error(message) as Error & { localSaved?: boolean };
+      offline.localSaved = true;
+      throw offline;
+    }
+    throw friendlyServiceError(error || new Error('Could not save this project.'));
+  }
+  await rememberProject(user.id, projectToSave, data.updated_at);
+}
+
+async function createProjectOnce(payload: any) {
+  const user = await currentUser();
+  const pendingKey = `${PENDING_CREATE_PREFIX}${user.id}`;
+  const payloadKey = JSON.stringify(payload);
+  let pending: { id: string; payload: string } | null = null;
+  try { pending = JSON.parse(await AsyncStorage.getItem(pendingKey) || 'null'); } catch { /* Start a new draft key. */ }
+  const id = pending?.payload === payloadKey ? pending.id : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.floor(Math.random() * 16);
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+  try { await AsyncStorage.setItem(pendingKey, JSON.stringify({ id, payload: payloadKey })); } catch { /* In-memory de-duplication still protects this attempt. */ }
+  const now = new Date().toISOString();
+  const project = {
+    id, user_id: user.id, ...payload, status: 'draft', storyboard: null,
+    scene_map: null, clips: [], export_url: null, thumbnail_url: null,
+    created_at: now, updated_at: now,
+  };
+  let error: any = null;
+  try {
+    const result = await getSupabase().from('projects').insert({
+      id, user_id: user.id, data: project, created_at: now, updated_at: now,
+    });
+    error = result.error;
+  } catch (insertError) {
+    error = insertError;
+  }
+  if (error) {
+    // A retry after a lost response may hit the same row created by the first attempt.
+    let existing: any = null;
+    try {
+      const lookup = await getSupabase().from('projects').select('data,updated_at')
+        .eq('id', id).eq('user_id', user.id).maybeSingle();
+      if (lookup.error) throw lookup.error;
+      existing = lookup.data;
+    } catch (lookupError) {
+      throw friendlyServiceError(lookupError || error);
+    }
+    if (!existing?.data) throw friendlyServiceError(error);
+    await AsyncStorage.removeItem(pendingKey).catch(() => {});
+    await rememberProject(user.id, existing.data, existing.updated_at || null);
+    return existing.data;
+  }
+  await AsyncStorage.removeItem(pendingKey).catch(() => {});
+  await rememberProject(user.id, project, now);
+  return project;
 }
 
 async function deleteStoredFrames(paths: string[]) {
@@ -264,7 +482,7 @@ async function saveAudioTrack(
   try {
     await updateProjectData({ ...project, [track]: audioTrack, updated_at: new Date().toISOString() });
   } catch (updateError) {
-    await deleteStoredFrames([storagePath]);
+    if (!(updateError as any)?.localSaved) await deleteStoredFrames([storagePath]);
     throw updateError;
   }
   if (oldPath) await deleteStoredFrames([oldPath]);
@@ -332,31 +550,31 @@ export const api = {
   },
   me: async () => profile(await currentUser()),
   templates: async () => TEMPLATES,
-  createProject: async (payload: any) => {
-    const user = await currentUser();
-    const now = new Date().toISOString();
-    const id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-      const r = Math.floor(Math.random() * 16);
-      return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
-    });
-    const project = {
-      id, user_id: user.id, ...payload, status: 'draft', storyboard: null,
-      scene_map: null, clips: [], export_url: null, thumbnail_url: null,
-      created_at: now, updated_at: now,
-    };
-    const { error } = await getSupabase().from('projects').insert({
-      id, user_id: user.id, data: project, created_at: now, updated_at: now,
-    });
-    if (error) throw error;
-    return project;
+  createProject: (payload: any) => {
+    const key = JSON.stringify(payload);
+    const active = pendingProjectCreates.get(key);
+    if (active) return active;
+    const task = createProjectOnce(payload).finally(() => pendingProjectCreates.delete(key));
+    pendingProjectCreates.set(key, task);
+    return task;
   },
   listProjects: async (limit = 200) => {
     const user = await currentUser();
-    const { data, error } = await getSupabase().from('projects').select('data')
-      .eq('user_id', user.id).order('created_at', { ascending: false })
-      .limit(Math.max(1, Math.min(200, Math.floor(limit))));
-    if (error) throw error;
-    return (data || []).map((row: any) => row.data);
+    try {
+      const { data, error } = await getSupabase().from('projects').select('data,updated_at')
+        .eq('user_id', user.id).order('created_at', { ascending: false })
+        .limit(Math.max(1, Math.min(200, Math.floor(limit))));
+      if (error) throw error;
+      const projects = (data || []).map((row: any) => row.data);
+      for (const row of (data || []).slice(0, MAX_CACHED_PROJECTS).reverse()) {
+        await rememberProject(user.id, row.data, row.updated_at || null);
+      }
+      return projects;
+    } catch (error) {
+      const local = await cachedProjects(user.id);
+      if (local.length) return local.slice(0, Math.max(1, Math.min(200, Math.floor(limit))));
+      throw friendlyServiceError(error);
+    }
   },
   getProject: readProject,
   saveEditSettings: async (id: string, settings: Record<string, any>) => {
@@ -381,12 +599,23 @@ export const api = {
     const { error } = await getSupabase().from('projects').delete()
       .eq('id', id).eq('user_id', user.id);
     if (error) throw error;
+    await removeFromProjectIndex(user.id, id);
     await deleteStoredFrames(paths);
     return { ok: true };
   },
-  storyboard: async (id: string) => request(`/projects/${id}/storyboard`, {
-    method: 'POST', body: JSON.stringify({ language: await getLanguage() }),
-  }),
+  storyboard: async (id: string, force = false) => {
+    if (!force) {
+      const project = await readProject(id);
+      if (project.storyboard?.length) return {
+        storyboard: project.storyboard, storyboard_plan: project.storyboard_plan,
+        script: project.script || '', ai_generated: project.storyboard_ai_generated,
+        preserved_existing: true, cached: true,
+      };
+    }
+    return request(`/projects/${id}/storyboard`, {
+      method: 'POST', body: JSON.stringify({ language: await getLanguage() }),
+    });
+  },
   scan: async (project_id: string, image_base64: string, frames: string[] = []) => request('/scan', {
     method: 'POST', body: JSON.stringify({ project_id, frames: frames.length ? frames : [image_base64], language: await getLanguage() }),
   }),
@@ -483,7 +712,7 @@ export const api = {
         });
       return pendingQuality;
     } catch (error) {
-      await deleteStoredFrames(uploaded);
+      if (!(error as any)?.localSaved) await deleteStoredFrames(uploaded);
       throw error;
     }
   },

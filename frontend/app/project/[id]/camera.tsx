@@ -406,8 +406,7 @@ export default function DirectorCamera() {
 
   useEffect(() => {
     setInstruction(null);
-    if (cameraReady) requestDirection();
-  }, [cameraReady, requestDirection]);
+  }, [id, shotIndex]);
 
   const targetDur = shotObj?.duration_seconds || 3;
 

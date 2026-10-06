@@ -119,7 +119,7 @@ export default function Scan() {
     setGenerating(true);
     setScanError('');
     try {
-      await api.storyboard(id);
+      await api.storyboard(id, true);
       router.replace(`/project/${id}`);
     } catch (error: any) {
       setScanError(error?.message || 'Could not write the custom script. Try again.');

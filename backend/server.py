@@ -878,6 +878,11 @@ UI_TRANSLATION_SOURCE = {
     "retake_required": "Retake required", "your_shot": "Your shot · watch it back", "retake": "Retake",
     "next_shot": "Next shot", "finish_edit": "Finish & edit", "camera_movement_unavailable": "This browser cannot control the flashlight on this device.",
     "translation_loading": "Preparing your language…", "translation_failed": "Some labels may remain in English while offline.",
+    "local_recovery_pending": "Your latest changes are saved on this device and will sync when you are back online.",
+    "local_recovery_offline": "Showing the copy saved on this device. Reconnect to refresh your project and clips.",
+    "local_recovery_conflict": "This project changed on another device. Your latest changes are safe on this device but need help to sync.",
+    "project_load_failed": "Could not open this project. Check your connection and try again.",
+    "sync_try_again": "Try again",
 }
 UI_TRANSLATION_CACHE: Dict[str, Dict[str, str]] = {"en": dict(UI_TRANSLATION_SOURCE)}
 
