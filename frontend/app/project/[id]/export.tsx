@@ -241,6 +241,7 @@ export default function Export() {
     let alive = true;
     api.getProject(id).then((loaded) => {
       if (!alive) return;
+      const shouldPreviewReel = !initialLoadComplete.current && clipParam === undefined;
       setProject(loaded);
       const next = makeSettings(loaded);
       if (selectedShotRef.current === null) {
@@ -249,6 +250,7 @@ export default function Export() {
           const firstShot = shotIndex(first, 0);
           desiredShot.current = firstShot;
           desiredTime.current = editForShot(next, firstShot).trim_start_seconds;
+          if (shouldPreviewReel) autoAdvance.current = true;
           selectedShotRef.current = firstShot;
           setSelectedShot(firstShot);
         }
@@ -269,7 +271,7 @@ export default function Export() {
       setRenderError('');
     }).catch((error: any) => { if (alive) setRenderError(error.message || 'Could not load this project.'); });
     return () => { alive = false; };
-  }, [id]));
+  }, [id, clipParam]));
 
   useEffect(() => {
     if (!rendering) return;
@@ -338,7 +340,7 @@ export default function Export() {
     : 0;
   const webPreviewFilter = [FILTERS[activeFilter], FILTERS[settings.editing_style], activeEdit ? `brightness(${1 + activeEdit.brightness})` : null].filter(Boolean).join(' ');
   const spin = rot.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
-  const previewHeight = Math.max(235, Math.min(windowHeight * 0.47, 490));
+  const previewHeight = Math.max(235, Math.min(windowHeight * 0.55, 560));
   const [ratioWidth, ratioHeight] = settings.aspect_ratio.split(':').map(Number);
   const outputRatio = ratioWidth > 0 && ratioHeight > 0 ? ratioWidth / ratioHeight : 9 / 16;
   const previewMediaWidth = Math.min(windowWidth, previewHeight * outputRatio);
@@ -948,7 +950,7 @@ export default function Export() {
           </View>
           <View style={styles.previewTopRow}>
             {!!activeFilter && activeFilter !== 'original' ? <Text style={styles.previewBadge}>{activeFilter.replace('_', ' ')}</Text> : <View />}
-            <Text style={styles.previewCounter}>{activeClip ? `REEL · SHOT ${Math.max(0, orderedClips.indexOf(activeClip)) + 1} / ${orderedClips.length}` : 'REEL PREVIEW'}</Text>
+            <Text style={styles.previewCounter}>{activeClip ? `${playing ? 'FULL REEL' : 'REEL'} · SHOT ${Math.max(0, orderedClips.indexOf(activeClip)) + 1} / ${orderedClips.length}` : 'REEL PREVIEW'}</Text>
           </View>
           {captionPositionMode ? (
             <Pressable style={styles.captionPositionPill} onPress={() => setCaptionPositionMode(false)}>

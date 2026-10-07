@@ -3,6 +3,7 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator, Alert, Modal, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View,
+  useWindowDimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -29,6 +30,7 @@ export default function FinalPlayer() {
   const t = useT();
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const [project, setProject] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [rebuilding, setRebuilding] = useState(false);
@@ -115,6 +117,11 @@ export default function FinalPlayer() {
     (project?.export?.editing_style || project?.style || 'cinematic').replace('_', ' '),
     [project],
   );
+  const ratioMatch = String(project?.export?.aspect_ratio || '9:16').match(/^(\d+):(\d+)/);
+  const aspectRatio = ratioMatch ? Number(ratioMatch[1]) / Number(ratioMatch[2]) : 9 / 16;
+  const playerHeight = Math.min(windowHeight * 0.68, 680);
+  const playerWidth = Math.min(Math.max(1, windowWidth - 40), playerHeight * aspectRatio);
+  const playerFrameHeight = playerWidth / aspectRatio;
 
   if (loading) {
     return (
@@ -152,17 +159,17 @@ export default function FinalPlayer() {
         </View>
 
         <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
-          <View style={styles.playerWrap}>
+          <View style={[styles.playerWrap, { width: playerWidth, height: playerFrameHeight }]}>
             {url ? (
               <VideoView
                 player={player}
                 style={StyleSheet.absoluteFill}
-                contentFit="cover"
+                contentFit="contain"
                 nativeControls
                 testID="final-video-view"
               />
             ) : (
-              <Image source={{ uri: exp.thumbnail_url }} style={StyleSheet.absoluteFill} contentFit="cover" />
+              <Image source={{ uri: exp.thumbnail_url }} style={StyleSheet.absoluteFill} contentFit="contain" />
             )}
             <LinearGradient colors={['rgba(10,11,14,0.5)', 'transparent', 'rgba(10,11,14,0.75)']} style={StyleSheet.absoluteFill} pointerEvents="none" />
             <View style={styles.playerTopBar} pointerEvents="box-none">
@@ -325,7 +332,7 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.color.surface },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 8, paddingBottom: 12, gap: 12 },
   title: { flex: 1, color: theme.color.onSurface, fontSize: 17, fontWeight: '700' },
-  playerWrap: { marginHorizontal: 20, height: 420, borderRadius: theme.radius.lg, overflow: 'hidden', backgroundColor: '#000' },
+  playerWrap: { alignSelf: 'center', borderRadius: theme.radius.lg, overflow: 'hidden', backgroundColor: '#000' },
   playerTopBar: { position: 'absolute', top: 12, left: 12, right: 12, flexDirection: 'row', justifyContent: 'space-between' },
   playerBadge: { paddingHorizontal: 10, height: 28, borderRadius: theme.radius.pill, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
   playerBadgeText: { color: '#fff', fontSize: 11, fontWeight: '800', letterSpacing: 1 },
