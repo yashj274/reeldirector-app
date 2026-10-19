@@ -1,6 +1,6 @@
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Modal, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -24,6 +24,7 @@ export default function Profile() {
   const [styleSaving, setStyleSaving] = useState(false);
   const [styleError, setStyleError] = useState('');
   const [styleY, setStyleY] = useState(0);
+  const [infoTopic, setInfoTopic] = useState<null | 'subscription' | 'downloads' | 'notifications' | 'help' | 'privacy'>(null);
 
   useEffect(() => {
     void Promise.all([getUser(), getCreatorSkillLevel(), getCreatorStyleProfile()]).then(([profile, level, style]) => {
@@ -64,8 +65,42 @@ export default function Profile() {
     router.replace('/(auth)/login');
   };
 
-  const row = (icon: keyof typeof Ionicons.glyphMap, label: string, testID: string, onPress?: () => void) => (
-    <Pressable style={styles.row} onPress={onPress} testID={testID}>
+  const sendFeedback = async () => {
+    try {
+      await Share.share({
+        title: 'ReelDirector feedback',
+        message: `Feedback about ReelDirector beta:\n\n\nAccount: ${user?.email || 'not signed in'}`,
+      });
+    } catch {
+      Alert.alert('Feedback', 'Your device could not open its share options. Please try again.');
+    }
+  };
+
+  const info = {
+    subscription: {
+      title: t('subscription'),
+      body: `Your current account is on the ${(user?.plan || 'free').toUpperCase()} plan. Paid plan management is not available in this beta.`,
+    },
+    downloads: {
+      title: t('downloads'),
+      body: 'Finished reels are saved with their projects. Open a project, then choose Download on its finished reel to save a copy to this device.',
+    },
+    notifications: {
+      title: t('notifications'),
+      body: 'Push notifications are not enabled in this beta, so there are no notification settings to change yet.',
+    },
+    help: {
+      title: t('help_faq'),
+      body: 'Create a project from Home or Projects, add a clear description, then follow the shot plan. Allow camera and microphone access to record. If live camera is unavailable, use “Record or choose a video.” Review clips and edit the reel before exporting. Your saved projects are available from the Projects tab.',
+    },
+    privacy: {
+      title: t('privacy'),
+      body: 'ReelDirector uses Supabase for sign-in and to save project details and media. When you use AI features, your description and relevant scanned or recorded still frames are sent through the ReelDirector service to Gemini to generate guidance. Media may also be sent to configured video rendering services when you render a reel. Avoid including sensitive information or people who have not agreed to be recorded. You can delete a project from Projects; deleting a project also requests removal of its stored media. Account deletion and a full data export are not currently available in the app.',
+    },
+  } as const;
+
+  const row = (icon: keyof typeof Ionicons.glyphMap, label: string, testID: string, onPress: () => void) => (
+    <Pressable style={styles.row} onPress={onPress} testID={testID} accessibilityRole="button">
       <Ionicons name={icon} size={20} color={theme.color.onSurface} />
       <Text style={styles.rowText}>{label}</Text>
       <Ionicons name="chevron-forward" size={18} color={theme.color.onSurface3} />
@@ -166,16 +201,16 @@ export default function Profile() {
 
           <Text style={styles.section}>{t('account')}</Text>
           <View style={styles.list}>
-            {row('card-outline', t('subscription'), 'profile-subscription')}
-            {row('cloud-download-outline', t('downloads'), 'profile-downloads')}
-            {row('notifications-outline', t('notifications'), 'profile-notifications')}
+            {row('card-outline', t('subscription'), 'profile-subscription', () => setInfoTopic('subscription'))}
+            {row('cloud-download-outline', t('downloads'), 'profile-downloads', () => setInfoTopic('downloads'))}
+            {row('notifications-outline', t('notifications'), 'profile-notifications', () => setInfoTopic('notifications'))}
           </View>
 
           <Text style={styles.section}>{t('support')}</Text>
           <View style={styles.list}>
-            {row('help-circle-outline', t('help_faq'), 'profile-help')}
-            {row('chatbubble-outline', t('send_feedback'), 'profile-feedback')}
-            {row('shield-checkmark-outline', t('privacy'), 'profile-privacy')}
+            {row('help-circle-outline', t('help_faq'), 'profile-help', () => setInfoTopic('help'))}
+            {row('chatbubble-outline', t('send_feedback'), 'profile-feedback', () => void sendFeedback())}
+            {row('shield-checkmark-outline', t('privacy'), 'profile-privacy', () => setInfoTopic('privacy'))}
           </View>
 
           <Pressable style={styles.logout} onPress={logout} testID="profile-logout-button">
@@ -183,6 +218,22 @@ export default function Profile() {
           </Pressable>
         </ScrollView>
       </SafeAreaView>
+      <Modal visible={infoTopic !== null} transparent animationType="fade" onRequestClose={() => setInfoTopic(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.infoCard} accessibilityViewIsModal>
+            <Text style={styles.infoTitle}>{infoTopic ? info[infoTopic].title : ''}</Text>
+            <ScrollView style={styles.infoScroll}>
+              <Text style={styles.infoBody}>{infoTopic ? info[infoTopic].body : ''}</Text>
+            </ScrollView>
+            {infoTopic === 'downloads' && <Pressable style={styles.infoAction} onPress={() => { setInfoTopic(null); router.push('/(tabs)/projects'); }} accessibilityRole="button" testID="profile-downloads-projects">
+              <Text style={styles.infoCloseText}>{t('all_projects')}</Text>
+            </Pressable>}
+            <Pressable style={styles.infoClose} onPress={() => setInfoTopic(null)} accessibilityRole="button" testID="profile-info-close">
+              <Text style={styles.infoCloseText}>{t('cancel')}</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -223,4 +274,12 @@ const styles = StyleSheet.create({
   rowText: { flex: 1, color: theme.color.onSurface, fontSize: 15 },
   logout: { marginTop: 20, height: 52, borderRadius: theme.radius.md, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: theme.color.border },
   logoutText: { color: theme.color.error, fontWeight: '700' },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.72)', justifyContent: 'center', padding: 22 },
+  infoCard: { maxHeight: '75%', borderRadius: theme.radius.lg, padding: 20, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border },
+  infoTitle: { color: theme.color.onSurface, fontSize: 20, fontWeight: '700', marginBottom: 12 },
+  infoScroll: { flexShrink: 1 },
+  infoBody: { color: theme.color.onSurface2, fontSize: 15, lineHeight: 23 },
+  infoAction: { minHeight: 46, marginTop: 16, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.color.brand, alignItems: 'center', justifyContent: 'center' },
+  infoClose: { minHeight: 46, marginTop: 16, borderRadius: theme.radius.md, backgroundColor: theme.color.brand, alignItems: 'center', justifyContent: 'center' },
+  infoCloseText: { color: '#fff', fontWeight: '700' },
 });
