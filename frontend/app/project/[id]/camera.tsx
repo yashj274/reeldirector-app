@@ -145,6 +145,8 @@ export default function DirectorCamera() {
   const [micPermission, requestMicPermission] = useMicrophonePermissions();
   const cameraRef = useRef<CameraView>(null);
   const recordingPromise = useRef<Promise<RecordedVideo | undefined> | null>(null);
+  const recordingFrame = useRef<string | null>(null);
+  const nativeFrameCapture = useRef<Promise<string> | null>(null);
   const webVideoRef = useRef<HTMLVideoElement | null>(null);
   const webStreamRef = useRef<MediaStream | null>(null);
   const webAudioStreamRef = useRef<MediaStream | null>(null);
@@ -382,9 +384,18 @@ export default function DirectorCamera() {
         webDigitalZoomActive ? webDigitalZoom : 1);
       return canvas.toDataURL('image/jpeg', 0.4).split(',', 2)[1];
     }
-    const photo = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.4, skipProcessing: true });
-    if (!photo?.base64) throw new Error('Could not capture a frame from the camera.');
-    return photo.base64;
+    if (nativeFrameCapture.current) return nativeFrameCapture.current;
+    const capture = (async () => {
+      const photo = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.4, skipProcessing: true });
+      if (!photo?.base64) throw new Error('Could not capture a frame from the camera.');
+      return photo.base64;
+    })();
+    nativeFrameCapture.current = capture;
+    try {
+      return await capture;
+    } finally {
+      if (nativeFrameCapture.current === capture) nativeFrameCapture.current = null;
+    }
   }, [webDigitalZoom, webDigitalZoomActive]);
 
   // Ask the vision model to direct the current frame, not just the storyboard text.
@@ -474,6 +485,10 @@ export default function DirectorCamera() {
     if (recording) return;
     setCameraError(null);
     setBrightnessOpen(false);
+    if (!cameraReady) {
+      setCameraError('Camera is still starting. Wait for the preview, then try again.');
+      return;
+    }
     if (Platform.OS === 'web') {
       try {
         const cameraStream = webStreamRef.current;
@@ -559,26 +574,37 @@ export default function DirectorCamera() {
       }
       return;
     }
-    let currentMicPermission = micPermission;
-    if (!currentMicPermission?.granted) {
-      currentMicPermission = await requestMicPermission();
-    }
-    if (!currentMicPermission.granted) {
-      setCameraError('Microphone access is needed to record video with sound.');
-      return;
-    }
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
     try {
+      let currentMicPermission = micPermission;
+      if (!currentMicPermission?.granted) {
+        currentMicPermission = await requestMicPermission();
+      }
+      if (!currentMicPermission.granted) {
+        setCameraError('Allow microphone access in Android Settings to record video with sound.');
+        return;
+      }
+      if (!cameraRef.current) throw new Error('Camera is not ready. Wait for the preview, then try again.');
+      recordingFrame.current = await captureFrame();
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
       const recordingOptions = Platform.OS === 'ios'
         ? { maxDuration: Math.max(1, Math.ceil(targetDur)), codec: 'avc1' as const }
         : { maxDuration: Math.max(1, Math.ceil(targetDur)) };
       const nextRecording = cameraRef.current?.recordAsync(recordingOptions);
       if (!nextRecording) throw new Error('Camera is not ready. Try again in a moment.');
       recordingPromise.current = nextRecording;
+      void nextRecording.catch((error: any) => {
+        if (recordingPromise.current !== nextRecording || stoppingRecording.current) return;
+        if (recTimer.current) { clearInterval(recTimer.current); recTimer.current = null; }
+        recordingPromise.current = null;
+        recordingFrame.current = null;
+        setRecording(false);
+        setCameraError(error?.message || 'Android could not start video recording. Check camera and microphone access in Settings, then try again.');
+      });
       startTimer();
     } catch (e: any) {
       recordingPromise.current = null;
-      setCameraError(e.message || 'Could not start the camera recording.');
+      recordingFrame.current = null;
+      setCameraError(e?.message || 'Could not start the camera recording. Check camera and microphone access in Android Settings.');
     }
   };
 
@@ -602,7 +628,8 @@ export default function DirectorCamera() {
       captured = true;
       logBeta('recording', 'completed');
       const dur = Math.max(0.1, (Date.now() - clipStart.current) / 1000);
-      const frameBase64 = await captureFrame();
+      const frameBase64 = Platform.OS === 'web' ? await captureFrame() : recordingFrame.current;
+      if (!frameBase64) throw new Error('Could not capture the clip preview. Reopen the camera and record again.');
       if (id) {
         const q = await api.clipQuality(id, shotIndex, frameBase64, dur, {
           uri: recorded.uri, blob: recorded.blob, mimeType: recorded.mimeType,
@@ -628,6 +655,7 @@ export default function DirectorCamera() {
       setCameraError(e instanceof Error ? e.message : 'Could not save this clip. Please try again.');
     } finally {
       recordingPromise.current = null;
+      recordingFrame.current = null;
       webRecorderRef.current = null;
       if (webDigitalZoomFrameRef.current !== null) cancelAnimationFrame(webDigitalZoomFrameRef.current);
       webDigitalZoomFrameRef.current = null;
