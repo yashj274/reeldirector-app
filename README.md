@@ -49,7 +49,19 @@ The web preview supports project planning, email sign-in, storyboard guidance, c
 4. On the phone, open `http://<computer-ip>:8081/dashboard` in Safari or Chrome.
 5. Sign in on the phone. Each device and browser keeps its own sign-in session.
 
-A downloadable iOS or Android app requires a signed platform build. The app uses the `reeldirector://auth/callback` scheme for standalone authentication; the Supabase URL configuration must also allow the web callback at `/auth/callback`.
+A downloadable iOS or Android app requires a signed platform build. The app uses the `reeldirector://auth/callback` scheme for standalone authentication; the Supabase Auth redirect allowlist must include `reeldirector://auth/callback` and the web callback `https://reeldirector-web.vercel.app/auth/callback`.
+
+## Build native apps
+
+The same Expo Router app targets iOS, Android, and web. EAS Build profiles are in `frontend/eas.json`; `preview` creates an installable Android APK and internal iOS build, while `production` creates store builds.
+
+1. Install the EAS CLI and sign in with the Expo account that will own the builds.
+2. From `frontend/`, run `eas build:configure` once to link this app to an EAS project.
+3. Add these build environment variables to the EAS `production` environment: `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and `REELDIRECTOR_API_URL=https://reeldirector-api.onrender.com`. The Supabase publishable key is included in the client app; never add the Supabase secret key or Gemini key to EAS or the mobile bundle.
+4. Run `eas build --platform all --profile production` to create the iOS and Android store binaries, or use `--profile preview` for private device testing.
+5. Submit store builds with `eas submit --platform ios` and `eas submit --platform android` after connecting the Apple Developer and Google Play Console accounts.
+
+An Apple Developer membership is required for iOS device distribution and App Store release; a Google Play Console account is required to publish on Google Play. Builds need the Expo account, app signing, and production environment variables before they can be generated. Web deployment remains on Vercel.
 
 ## AI and media
 
