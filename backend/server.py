@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 import requests
 import imageio_ffmpeg
 from supabase import AsyncClient, create_async_client
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, Query
 from starlette.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -35,6 +35,11 @@ GEMINI_SCAN_MODEL = os.environ.get("GEMINI_SCAN_MODEL", "gemini-3.5-flash-lite")
 FAL_KEY = os.environ.get("FAL_KEY", "")
 FAL_VIDEO_MODEL = "fal-ai/wan/v2.7/text-to-video"
 CREATOMATE_API_KEY = os.environ.get("CREATOMATE_API_KEY", "")
+ADMIN_EMAILS = {
+    value.strip().casefold()
+    for value in os.environ.get("ADMIN_EMAILS", "").split(",")
+    if value.strip()
+}
 GEMINI_GENERATE_CONTENT_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "{model}:generateContent"
@@ -185,6 +190,9 @@ def get_supabase() -> AsyncClient:
         raise HTTPException(503, "Supabase is not configured on the backend")
     return supabase
 
+def is_admin_email(email: Optional[str]) -> bool:
+    return bool(email and email.casefold() in ADMIN_EMAILS)
+
 async def current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing bearer token")
@@ -205,7 +213,14 @@ async def current_user(authorization: Optional[str] = Header(None)) -> Dict[str,
         "plan": metadata.get("plan", "free"),
         "creator_skill_level": skill_level if skill_level in {"beginner", "creator", "pro"} else "beginner",
         "creator_style_profile": sanitize_creator_style_profile(metadata.get("creator_style_profile")),
+        "is_admin": is_admin_email(account.email),
     }
+
+
+async def require_admin(user=Depends(current_user)) -> Dict[str, Any]:
+    if not is_admin_email(user.get("email")):
+        raise HTTPException(403, "Admin access is not enabled for this account")
+    return user
 
 def sanitize_creator_style_profile(value: Any) -> Dict[str, Any]:
     styles = {"cinematic", "fast_pace", "minimal", "editorial", "luxury", "action"}
@@ -722,6 +737,91 @@ async def me(user=Depends(current_user)):
     return user
 
 
+def _admin_project_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    data = row.get("data") if isinstance(row.get("data"), dict) else {}
+    clips = data.get("clips") if isinstance(data.get("clips"), list) else []
+    return {
+        "id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "title": str(data.get("title") or "Untitled project")[:160],
+        "shoot_type": str(data.get("shoot_type") or "other")[:60],
+        "status": str(data.get("status") or "draft")[:40],
+        "clip_count": len(clips),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+@api.get("/admin/overview")
+async def admin_overview(_user=Depends(require_admin)):
+    try:
+        result = await get_supabase().table("projects").select(
+            "id,user_id,data,created_at,updated_at", count="exact"
+        ).order("updated_at", desc=True).limit(8).execute()
+    except Exception as exc:
+        log.exception("Admin overview could not read project data")
+        raise HTTPException(503, "Could not load project overview") from exc
+    return {
+        "project_count": int(result.count or 0),
+        "recent_projects": [_admin_project_summary(row) for row in (result.data or [])],
+        "services": {
+            "database": supabase is not None,
+            "gemini": bool(GEMINI_API_KEY),
+            "local_rendering": True,
+            "creatomate": bool(CREATOMATE_API_KEY),
+            "ai_video": bool(FAL_KEY),
+        },
+    }
+
+
+@api.get("/admin/projects")
+async def admin_projects(
+    page: int = Query(1, ge=1, le=100000),
+    per_page: int = Query(20, ge=1, le=50),
+    _user=Depends(require_admin),
+):
+    start = (page - 1) * per_page
+    try:
+        result = await get_supabase().table("projects").select(
+            "id,user_id,data,created_at,updated_at", count="exact"
+        ).order("updated_at", desc=True).range(start, start + per_page - 1).execute()
+    except Exception as exc:
+        log.exception("Admin project list could not be loaded")
+        raise HTTPException(503, "Could not load projects") from exc
+    return {
+        "items": [_admin_project_summary(row) for row in (result.data or [])],
+        "total": int(result.count or 0),
+        "page": page,
+        "per_page": per_page,
+        "has_more": start + len(result.data or []) < int(result.count or 0),
+    }
+
+
+@api.get("/admin/users")
+async def admin_users(
+    page: int = Query(1, ge=1, le=100000),
+    per_page: int = Query(20, ge=1, le=50),
+    _user=Depends(require_admin),
+):
+    try:
+        users = await get_supabase().auth.admin.list_users(page=page, per_page=per_page)
+    except Exception as exc:
+        log.exception("Admin account list could not be loaded")
+        raise HTTPException(503, "Could not load accounts") from exc
+    items = []
+    for account in users or []:
+        metadata = account.user_metadata or {}
+        items.append({
+            "id": str(account.id),
+            "email": account.email or "",
+            "name": str(metadata.get("name") or metadata.get("full_name") or "Director")[:120],
+            "created_at": account.created_at,
+            "last_sign_in_at": account.last_sign_in_at,
+            "is_admin": is_admin_email(account.email),
+        })
+    return {"items": items, "page": page, "per_page": per_page, "has_more": len(items) == per_page}
+
+
 # ---------------- Templates ----------------
 TEMPLATES = [
     {"id": "wedding", "name": "Wedding Cinema", "mood": "Emotional • Romantic", "duration": 45, "style": "cinematic",
@@ -1006,8 +1106,9 @@ async def translate_ui(language_code: str):
 STORYBOARD_SYSTEM = """You are a culturally informed film director and short-form video scriptwriter.
 Return ONLY one JSON object with `title`, `concept`, `style`, `goal`, `totalDuration`, `hook`, `cta`, and `shots`. Return 4 to 8 shots. Each shot includes `shotNumber` (1-based), `purpose` (hook/detail/action/hero/cta), `shotType`, `duration`, `cameraMovement`, `animationTemplate`, `subjectPosition`, `cameraStart`, `cameraEnd`, `instruction`, `voiceover`, `onScreenText`, and `difficulty` (easy/medium/advanced), plus `title` and `description`.
 Use these movements: static, pan_left, pan_right, tilt_up, tilt_down, dolly_in, dolly_out, tracking, orbit, reveal, handheld. Use these shot types: extreme_wide, wide, medium, close_up, extreme_close_up. Durations must be 1.5 to 12 seconds and add up close to the requested total.
-Keep each on-camera `instruction` to one simple sentence of 8-12 words or fewer, in the requested language. Beginner instructions use everyday words and no camera jargon. Creator instructions may add one framing or movement detail. Pro instructions may use concise filming terminology. Keep descriptions to one sentence. Voiceover and on-screen text are optional; use empty strings when they do not help the story.
-No prose outside JSON. Be specific to the user's purpose and audience. Infer cultural meaning from clear event names (for example, a mehndi is commonly a South Asian pre-wedding celebration centered on henna art, close family moments, music, and ritual); use that understanding respectfully, adapt details to the supplied scene scan, and never invent people or rituals that the user did not describe or the image does not support. Do not replace the user's event with a generic template. When a reliable scene scan is present, choose real visible subjects or objects that fit the user's story and name them directly in the relevant shot title, description, or filming instruction. Make each shot tell the beginner what to point at and, when useful, where to stand or how to move. Avoid generic phrases such as “film a detail” when a specific scanned element is available."""
+Keep each on-camera `instruction` to one simple sentence of 12 words or fewer, in the requested language. It must tell the creator what to frame, what single move to make, and where to finish; beginner wording uses everyday words and no camera jargon. Make `cameraStart`, `cameraEnd`, and `subjectPosition` agree with the instruction and movement animation. Keep descriptions to one useful sentence. Voiceover and on-screen text are optional; use empty strings when they do not help the story.
+Build a beginning, middle, and ending that tells this user's story. Make the opening a visual hook or reveal, not an automatic generic wide shot. Each later shot must add a new story beat, subject, scale, or angle; finish with a memorable payoff or a goal-specific invitation. For an office, showroom, shop, or interior showcase, reveal the entrance or strongest real view first, then show the space, distinctive features, real activity if present, and a final hero view. Use opening doors only when the scan or creator confirms doors. For a ceremony, build from anticipation and meaningful details toward authentic people or rituals only when present, then a personal closing memory. For travel, reveal the place, guide the viewer through a safe path, show a distinctive landmark or texture, and finish on the strongest view. For other ideas, derive a fresh arc from the creator's explanation rather than reusing a category template.
+No prose outside JSON. Be specific to the user's purpose and audience. Infer cultural meaning from clear event names (for example, a mehndi is commonly a South Asian pre-wedding celebration centered on henna art, close family moments, music, and ritual); use that understanding respectfully, adapt details to the supplied scene scan, and never invent people or rituals that the user did not describe or the image does not support. Use the scan to select real visible subjects, positions, backgrounds, and feasible moves; name the chosen subject in each relevant shot. Without a reliable scan, use only objects and actions the creator described, and give a shootable framing plan that can be adapted to the real location. Never write a direction that could fit any reel unchanged: replace vague lines like “show the scene,” “film a detail,” or “move closer” with a named target, clear starting frame, one controlled move, and a clear ending frame. Vary shot size and movement without repeating the same subject unnecessarily. Before returning JSON, silently review every shot for story progression, filmability, scan truth, and a movement that matches its animation; rewrite any weak or generic shot."""
 
 STORY_PHASES = ("hook", "detail", "action", "hero", "cta")
 
@@ -1087,12 +1188,15 @@ def fallback_storyboard(doc: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]
     scan = doc.get("scene_map") or {}
     scan_summary = str(scan.get("summary") or "").strip() if scan.get("ai_generated", True) else ""
     scene_elements: List[str] = []
+    scene_positions: Dict[str, str] = {}
     if scan.get("ai_generated", True):
         scanned = scan.get("focus_elements") or []
         for item in scanned:
             name = item.get("name") if isinstance(item, dict) else item
             if isinstance(name, str) and name.strip():
                 scene_elements.append(name.strip())
+                if isinstance(item, dict) and item.get("position") in {"left", "center", "right", "foreground", "background"}:
+                    scene_positions[name.strip()] = item["position"]
         for field in ("objects", "subjects"):
             values = scan.get(field) or []
             if isinstance(values, list):
@@ -1111,6 +1215,32 @@ def fallback_storyboard(doc: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]
             ("Closing memory", "End on the most expressive real detail from the mehndi, holding a calm final frame.", "reveal", "medium", "Make a small, smooth reveal and pause on the strongest detail before stopping."),
             ("Quiet beat", "Add a still moment that lets the henna design and celebration atmosphere register.", "static", "close_up", "Hold a steady close frame on a visible henna or decor detail."),
             ("Final frame", "Return to the clearest visible part of this celebration to complete its story.", "pan_right", "wide", "Pan gently across the scene and finish on the best-lit real detail."),
+        ]
+    elif any(word in lower for word in ("office", "showroom", "workspace", "workplace", "business", "real_estate", "salon", "clinic", "studio", "store", "shop")):
+        scan_words = " ".join([scan_summary, *scene_elements]).casefold()
+        opening = "Start at the visible doorway; glide forward to reveal the showroom." if any(
+            word in scan_words for word in ("door", "entrance", "entry")
+        ) else "Start with the widest clear view; glide forward to reveal the main space."
+        blueprints = [
+            ("The first impression", f"Reveal {subject} through the clearest real view of the office or showroom.", "reveal", "wide", opening),
+            ("The signature area", "Show the part of the space that best explains what this business offers.", "pan_right", "wide", "Pan right from the entrance toward the most distinctive area."),
+            ("A working moment", "Show genuine work or service only when a person is visibly doing it.", "tracking", "medium", "Move past the real activity at a calm, even pace."),
+            ("A crafted detail", "Feature a distinctive finish, display, tool, or feature that is actually present.", "dolly_in", "close_up", "Start with the feature in context; move closer and hold on its detail."),
+            ("The customer view", "Show how a visitor would naturally see and move through this space.", "pan_left", "wide", "Pan left across the clear path a visitor would follow."),
+            ("The hero space", "End on the clearest view of the space that matches the creator's goal.", "dolly_out", "wide", "Start on the main feature; step back to reveal the full space."),
+            ("One final detail", "Add a second real feature that gives the place its own character.", "tilt_down", "close_up", "Tilt down slowly and finish on the most distinctive visible detail."),
+            ("A clean close", "Leave the viewer with a memorable, uncluttered view of the real space.", "static", "wide", "Frame the strongest view; hold steady for a clean final beat."),
+        ]
+    elif any(word in lower for word in ("wedding", "ceremony", "haldi", "engagement", "reception", "anniversary")):
+        blueprints = [
+            ("Before the moment", f"Establish the real setting and anticipation around {subject}.", "static", "wide", "Start wide on the actual setting; hold for a quiet opening beat."),
+            ("A meaningful detail", "Show a real object or decoration that matters to this ceremony.", "dolly_in", "close_up", "Move slowly toward one meaningful visible detail and hold."),
+            ("Getting ready", "Include preparation only if it is happening in the scene.", "tracking", "medium", "Follow one real preparation moment with a smooth, level move."),
+            ("The connection", "Capture a genuine interaction when people are present; never stage a ritual.", "pan_right", "medium", "Pan gently toward a real interaction and hold on the shared moment."),
+            ("The central moment", "Build toward the creator's named highlight, only if it is visible or described.", "reveal", "close_up", "Let the real highlight enter frame; stop moving once it is clear."),
+            ("A lasting memory", "Finish on the strongest authentic detail or moment from this ceremony.", "dolly_out", "wide", "Ease back from the highlight to include its real surroundings."),
+            ("A softer beat", "Add one calm detail that supports the feeling of this occasion.", "tilt_up", "close_up", "Tilt up from the detail and finish on its full context."),
+            ("The final frame", "End on a clear image that feels personal to this event.", "static", "medium", "Frame the strongest real moment and hold still to finish."),
         ]
     elif any(word in lower for word in ("birthday", "anniversary", "celebration", "party")):
         blueprints = [
@@ -1169,6 +1299,19 @@ def fallback_storyboard(doc: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]
         ]
 
     shots = []
+    scene_directions = {
+        "static": "Frame {subject} within its setting; hold steady for a clean beat.",
+        "pan_left": "Start beside {subject}; pan left slowly to reveal more of the setting.",
+        "pan_right": "Start beside {subject}; pan right slowly to reveal more of the setting.",
+        "tilt_up": "Start low on {subject}; tilt up slowly to reveal its full form.",
+        "tilt_down": "Start above {subject}; tilt down slowly and settle on its key detail.",
+        "dolly_in": "Start wide on {subject}; move closer slowly and hold on its detail.",
+        "dolly_out": "Start close on {subject}; step back slowly to reveal its setting.",
+        "tracking": "Move past {subject} slowly; keep it framed and the phone level.",
+        "orbit": "Move in a short, steady arc around {subject}; keep it centered.",
+        "reveal": "Let {subject} enter from frame right; stop once it is fully revealed.",
+        "handheld": "Frame {subject} at chest height; move slowly without shaking.",
+    }
     for index in range(count):
         title, description, movement, size, direction = blueprints[index]
         if index > 0 and scene_elements:
@@ -1176,7 +1319,10 @@ def fallback_storyboard(doc: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]
             visible_name = element if element.lower().startswith(("a ", "an ", "the ")) else f"the {element}"
             title = f"{title}: {element}"
             description = f"Feature {visible_name}, identified in the scene scan. {description}"
-            direction = f"Stand beside {visible_name}; move closer."
+            direction = scene_directions.get(movement, "Frame {subject} clearly; move slowly and finish on its strongest detail.").format(subject=visible_name)
+            position = scene_positions.get(element)
+            if position in {"left", "center", "right"} and movement == "static":
+                direction = f"Keep {visible_name} in the {position} third; hold steady for a clean beat."
         shots.append({
             "index": index,
             "title": f"{title} · {subject[:40]}",
@@ -1227,8 +1373,8 @@ Creator skill level: {user.get('creator_skill_level', 'beginner')}
 {style_context}
 Environment scan: {scene_context}
 
-Use the title and creator's explanation as the source of truth. Notice cultural/event references and make the storytelling, shot ideas, props/details, and narration fit that occasion. Use the environment scan to choose subjects, backgrounds, lighting, and feasible framing; never claim a person or object is present unless the scan supports it. Return the complete structured storyboard with title, concept, style, goal, totalDuration, hook, cta, and 4 to 8 shots whose durations add up close to {doc['duration_seconds']} seconds.
-Make it practical to film on a phone and tailored to {doc['platform']}. Match the creator skill level in every short instruction. Use the stored creator style only as a light preference when it fits this description and setting. For each shot, clearly name the visible subject or object the person should film whenever the scan supplies a suitable one. Give simple, specific actions such as “Stand beside the statue and move closer” or “Frame the chair from its left side,” translated naturally into {language}. Vary the chosen scanned elements across the reel when the scene supports it. Do not claim an element exists solely because the creator mentioned it; the scan must support it."""
+Use the title and creator's explanation as the source of truth. Notice cultural/event references and make the storytelling, shot ideas, props/details, and narration fit that occasion. Use the environment scan to choose actual subjects, positions, backgrounds, lighting, and safe feasible framing; never claim a person or object is present unless the scan supports it. Return the complete structured storyboard with title, concept, style, goal, totalDuration, hook, cta, and 4 to 8 shots whose durations add up close to {doc['duration_seconds']} seconds.
+Make it practical to film on a phone and tailored to {doc['platform']}. Match the creator skill level in every instruction and use everyday words. Every instruction must name its target, starting composition, one camera action, and finishing composition in 12 words or fewer. Fill `cameraStart`, `cameraEnd`, and `subjectPosition` with matching concrete framing details. Choose a visual story arc for this exact idea: for an office/showroom, use an entrance reveal only when one is visible or described, then the hero space, distinctive features, authentic activity, and final view; for ceremonies, move from anticipation through meaningful details to a real emotional payoff; for travel, reveal the location, move through it, find a distinctive detail, then end on its strongest view. For all other ideas, invent a fresh sequence from the creator's explanation. Use the stored creator style only as a light preference when it fits this description and setting. Make every shot filmable and different from the previous one. Do not use generic directions or repeat one object across the reel. Without a scan, do not invent props, people, doors, or actions. Before returning, silently critique each shot and rewrite any vague, repetitive, unsafe, scan-inconsistent, or movement-mismatched direction."""
 
     ai_generated = True
     script = ""
@@ -2120,9 +2266,9 @@ Current shot: {json.dumps(existing)}
 User notes: {body.notes or 'make it more cinematic'}
 Creator skill level: {user.get('creator_skill_level', 'beginner')}
 {style_context}
-Return one shot object using the storyboard shot fields shotNumber, purpose, shotType, duration, cameraMovement, animationTemplate, subjectPosition, cameraStart, cameraEnd, instruction, voiceover, onScreenText, difficulty, title, and description. Keep the action instruction under 12 words and all written fields in {language}. Fit the project purpose and actual scanned environment."""
+Return one shot object using the storyboard shot fields shotNumber, purpose, shotType, duration, cameraMovement, animationTemplate, subjectPosition, cameraStart, cameraEnd, instruction, voiceover, onScreenText, difficulty, title, and description. Keep all written fields in {language}. In 12 words or fewer, the instruction must name the real target, starting frame, one camera move, and ending frame. Make this shot advance the story and use a new composition; its animation, movement, start, and end must agree. Use only supported scan details, or only the creator's description when no reliable scan exists. Never use vague instructions such as “show the scene” or invent doors, people, objects, or actions. Silently check that the revised direction is specific, cinematic, practical to film, and distinct from adjacent shots."""
     try:
-        raw = await chat_once("You are a culturally informed short-form video director. Return only one valid JSON shot object; do not include a storyboard wrapper or prose.", prompt)
+        raw = await chat_once("You are a culturally informed short-form film director. Return only one valid JSON shot object; do not include a storyboard wrapper or prose. Reject generic directions and require a named subject, purposeful composition, controlled camera move, and clear end frame.", prompt)
         newshot = extract_json(raw)
         if isinstance(newshot, list) and newshot:
             newshot = newshot[0]

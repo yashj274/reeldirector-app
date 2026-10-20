@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
+  api,
   clearAuth, getUser, getCreatorSkillLevel, setCreatorSkillLevel, CreatorSkillLevel,
   getCreatorStyleProfile, saveCreatorStylePreferences, resetCreatorStyleProfile,
   CreatorStyleProfile, CreatorStyle, CreatorStyleMood,
@@ -17,6 +18,7 @@ export default function Profile() {
   const router = useRouter();
   const scrollRef = useRef<ScrollView>(null);
   const [user, setUser] = useState<any>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [skill, setSkill] = useState<CreatorSkillLevel>('beginner');
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillError, setSkillError] = useState('');
@@ -32,6 +34,7 @@ export default function Profile() {
       setSkill(level);
       setStyleProfile(style);
     });
+    void api.adminAccess().then((profile) => setIsAdmin(profile?.is_admin === true)).catch(() => setIsAdmin(false));
   }, []);
 
   const saveSkill = async (level: CreatorSkillLevel) => {
@@ -212,6 +215,13 @@ export default function Profile() {
             {row('chatbubble-outline', t('send_feedback'), 'profile-feedback', () => void sendFeedback())}
             {row('shield-checkmark-outline', t('privacy'), 'profile-privacy', () => setInfoTopic('privacy'))}
           </View>
+
+          {isAdmin && <>
+            <Text style={styles.section}>Administration</Text>
+            <View style={styles.list}>
+              {row('speedometer-outline', 'Admin console', 'profile-admin', () => router.push('/admin' as any))}
+            </View>
+          </>}
 
           <Pressable style={styles.logout} onPress={logout} testID="profile-logout-button">
             <Text style={styles.logoutText}>{t('log_out')}</Text>

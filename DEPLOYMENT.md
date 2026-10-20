@@ -13,6 +13,7 @@ The web app can be installed from Safari or Chrome once it is served from an HTT
 
 1. Put this project in a private GitHub repository. The root `.gitignore` excludes local `.env` files, dependency folders, and build output.
 2. In Render, create a Blueprint from that repository and select `render.yaml`. Enter `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, and `GEMINI_API_KEY` in Render's secret fields. Keep every service key out of the frontend.
+   - To enable the admin console, set `ADMIN_EMAILS` on the Render service to the comma-separated sign-in email addresses allowed to administer the app. Leave it empty to disable admin access. The backend checks this allowlist on every admin request; user-editable profile metadata cannot grant admin access.
 3. Wait for the `reeldirector-api` service to deploy. Copy its HTTPS URL, usually `https://reeldirector-api.onrender.com`.
 4. In Vercel, import the same repository and set the project root to `frontend/`. Add these build environment variables in Vercel:
    - `EXPO_PUBLIC_SUPABASE_URL` — the existing Supabase project URL.

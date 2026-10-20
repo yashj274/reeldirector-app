@@ -245,9 +245,11 @@ export default function Export() {
       setProject(loaded);
       const next = makeSettings(loaded);
       if (selectedShotRef.current === null) {
-        const first = (loaded.clips || []).find((clip: any, index: number) => next.clip_edits.find((edit) => edit.shot_index === shotIndex(clip, index))?.included);
-        if (first) {
-          const firstShot = shotIndex(first, 0);
+        const firstShot = next.clip_order.find((shot) => {
+          const clip = (loaded.clips || []).find((item: any, index: number) => shotIndex(item, index) === shot);
+          return !!clip?.video_url && editForShot(next, shot).included;
+        });
+        if (firstShot !== undefined) {
           desiredShot.current = firstShot;
           desiredTime.current = editForShot(next, firstShot).trim_start_seconds;
           if (shouldPreviewReel) autoAdvance.current = true;
@@ -425,9 +427,7 @@ export default function Export() {
       if (status === 'readyToPlay') preparePlayer(player);
     });
     const playingSub = player.addListener('playingChange', ({ isPlaying }) => setPlaying(isPlaying));
-    const endSub = player.addListener('playToEnd', () => {
-      if (player.currentTime >= currentClipEnd.current - 0.08) advanceRef.current(player);
-    });
+    const endSub = player.addListener('playToEnd', () => advanceRef.current(player));
     // A short clip can finish before React attaches listeners to its new player.
     // Check readiness after subscribing so the next segment still starts.
     preparePlayer(player);

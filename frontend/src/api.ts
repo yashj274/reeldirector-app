@@ -703,6 +703,10 @@ async function removeAudioTrack(projectId: string, track: 'soundtrack' | 'voiceo
 
 export const api = {
   warmBackend,
+  adminAccess: async () => request('/auth/me'),
+  adminOverview: async () => request('/admin/overview'),
+  adminUsers: async (page = 1) => request(`/admin/users?page=${page}&per_page=20`),
+  adminProjects: async (page = 1) => request(`/admin/projects?page=${page}&per_page=20`),
   signup: async (email: string, password: string, name: string) => {
     const creatorSkillLevel = await AsyncStorage.getItem(CREATOR_SKILL_KEY);
     const emailRedirectTo = Platform.OS === 'web' && typeof window !== 'undefined'

@@ -31,6 +31,38 @@ class BackendTests(unittest.TestCase):
         self.assertFalse(health.json()["supabase_configured"])
         self.assertEqual(unauthenticated.status_code, 401)
 
+    def test_admin_access_uses_normalized_server_allowlist(self):
+        with patch.object(server, "ADMIN_EMAILS", {"admin@example.com"}):
+            self.assertTrue(server.is_admin_email("Admin@Example.com"))
+            self.assertFalse(server.is_admin_email("user@example.com"))
+            self.assertFalse(server.is_admin_email(None))
+
+    def test_admin_routes_reject_non_admin_accounts(self):
+        async def run():
+            server.app.dependency_overrides[server.current_user] = lambda: {
+                "id": "user-1", "email": "user@example.com", "is_admin": False,
+            }
+            try:
+                transport = httpx.ASGITransport(app=server.app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    return await client.get("/api/admin/overview")
+            finally:
+                server.app.dependency_overrides.pop(server.current_user, None)
+
+        with patch.object(server, "ADMIN_EMAILS", {"admin@example.com"}):
+            response = asyncio.run(run())
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_project_summary_does_not_return_private_media_fields(self):
+        summary = server._admin_project_summary({
+            "id": "p1", "user_id": "u1", "created_at": "2026-10-20", "updated_at": "2026-10-20",
+            "data": {"title": "Office", "shoot_type": "business", "status": "editing",
+                     "clips": [{"video_url": "https://private.example/video", "frame_base64": "secret"}]},
+        })
+        self.assertEqual(summary["clip_count"], 1)
+        self.assertNotIn("video_url", summary)
+        self.assertNotIn("frame_base64", summary)
+
     def test_json_extraction_handles_model_fences(self):
         self.assertEqual(server.extract_json('```json\n{"instruction":"Pan left"}\n```'),
                          {"instruction": "Pan left"})
