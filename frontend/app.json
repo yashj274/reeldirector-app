@@ -53,12 +53,24 @@
         {
           "photosPermission": "Allow ReelDirector to save your finished videos.",
           "savePhotosPermission": "Allow ReelDirector to save your finished videos.",
-          "granularPermissions": ["video"]
+          "granularPermissions": [
+            "video"
+          ]
         }
       ]
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "backendUrl": "https://reeldirector-api.onrender.com",
+      "supabaseUrl": "",
+      "supabasePublishableKey": "",
+      "router": {},
+      "eas": {
+        "projectId": "70b05572-9905-4b4c-bdbb-a52c55d6a38d"
+      }
+    },
+    "owner": "yashjain05"
   }
 }
