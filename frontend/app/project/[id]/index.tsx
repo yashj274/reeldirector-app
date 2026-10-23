@@ -118,8 +118,12 @@ export default function ProjectDetail() {
       && (!saved.has(index) || targetProject.storyboard?.[index]?.status === 'retake');
     const focused = isAvailable(focusedShotIndex) ? focusedShotIndex : -1;
     const pending = (targetProject.storyboard || []).findIndex((_shot: any, index: number) => isAvailable(index));
-    if (pending < 0 && saved.size === 0) {
-      Alert.alert(t('shot_plan'), t('all_shots_skipped'));
+    if (pending < 0) {
+      if (saved.size === 0) {
+        Alert.alert(t('shot_plan'), t('all_shots_skipped'));
+      } else {
+        router.push({ pathname: '/project/[id]/export', params: { id } });
+      }
       return;
     }
     router.push({ pathname: '/project/[id]/camera', params: { id, shot: String(focused >= 0 ? focused : Math.max(0, pending)) } });

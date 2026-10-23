@@ -15,6 +15,35 @@ import server
 
 
 class BackendTests(unittest.TestCase):
+    def test_auto_edit_suggestions_are_bounded_to_real_clips(self):
+        shots = [
+            {"shot_index": 2, "source_duration_seconds": 4.0},
+            {"shot_index": 5, "source_duration_seconds": 6.0},
+        ]
+        result = server.normalize_auto_edit_result({
+            "clip_order": [5, 2],
+            "clips": [
+                {"shot_index": 5, "trim_start_seconds": -1, "trim_end_seconds": 8, "playback_rate": 3},
+                {"shot_index": 2, "trim_start_seconds": 1, "trim_end_seconds": 2, "playback_rate": 0.75},
+            ],
+            "editing_style": "fast_pace", "summary": "A tighter opening.",
+        }, shots, "cinematic")
+        self.assertEqual(result["clip_order"], [5, 2])
+        self.assertEqual(result["clip_edits"][0], {
+            "shot_index": 5, "trim_start_seconds": 0, "trim_end_seconds": 6, "playback_rate": 1,
+        })
+        self.assertEqual(result["clip_edits"][1]["playback_rate"], 0.75)
+
+    def test_auto_edit_rejects_missing_or_duplicate_clips(self):
+        shots = [{"shot_index": 0, "source_duration_seconds": 2.0}]
+        with self.assertRaises(ValueError):
+            server.normalize_auto_edit_result({"clip_order": [], "clips": []}, shots, "cinematic")
+        with self.assertRaises(ValueError):
+            server.normalize_auto_edit_result({
+                "clip_order": [0],
+                "clips": [{"shot_index": 0}, {"shot_index": 0}],
+            }, shots, "cinematic")
+
     def test_health_and_auth_guard(self):
         async def run():
             transport = httpx.ASGITransport(app=server.app)

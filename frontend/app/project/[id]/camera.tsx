@@ -9,12 +9,15 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
+import * as VideoThumbnails from 'expo-video-thumbnails';
+import * as FileSystem from 'expo-file-system/legacy';
 
 import { api, DirectorGuidance } from '@/src/api';
 import { logBeta } from '@/src/betaLog';
 import { theme } from '@/src/theme';
 import { ClipVideoPreview } from '@/src/ClipVideoPreview';
 import { MovementGuide } from '@/src/MovementGuide';
+import { nextUnfilmedShotIndex } from '@/src/shotFlow';
 import { useT } from '@/src/i18n';
 
 type Mode = 'video' | 'cinematic';
@@ -139,7 +142,8 @@ function readVideoFrame(file: File): Promise<VideoFrame> {
 
 export default function DirectorCamera() {
   const t = useT();
-  const { id, shot } = useLocalSearchParams<{ id: string; shot?: string }>();
+  const { id, shot, retake: retakeParam } = useLocalSearchParams<{ id: string; shot?: string; retake?: string }>();
+  const editorRetake = retakeParam === '1';
   const router = useRouter();
   const [permission, requestPermission] = useCameraPermissions();
   const [micPermission, requestMicPermission] = useMicrophonePermissions();
@@ -199,11 +203,16 @@ export default function DirectorCamera() {
       const requestedSkipped = requestedShot?.status === 'skipped';
       const firstUnfilmed = (loaded.storyboard || []).findIndex((item: any, index: number) =>
         item.status !== 'skipped' && (!(loaded.clips || []).some((clip: any) => Number(clip.shot_index) === index) || item.status === 'retake'));
-      const selected = (existing || requestedSkipped) && firstUnfilmed >= 0 ? firstUnfilmed : requested;
+      if (!editorRetake && existing && firstUnfilmed < 0) {
+        router.replace({ pathname: '/project/[id]/export', params: { id } });
+        return;
+      }
+      const selected = editorRetake ? requested
+        : (existing || requestedSkipped) && firstUnfilmed >= 0 ? firstUnfilmed : requested;
       shotIndexRef.current = selected;
       setShotIndex(selected);
     }).catch(() => {});
-  }, [id, shot]);
+  }, [editorRetake, id, router, shot]);
 
   useEffect(() => { shotIndexRef.current = shotIndex; }, [shotIndex]);
 
@@ -584,7 +593,9 @@ export default function DirectorCamera() {
         return;
       }
       if (!cameraRef.current) throw new Error('Camera is not ready. Wait for the preview, then try again.');
-      recordingFrame.current = await captureFrame();
+      // This camera is configured for video; a still capture can fail on some
+      // Android devices and must never prevent video recording from starting.
+      recordingFrame.current = null;
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
       const recordingOptions = Platform.OS === 'ios'
         ? { maxDuration: Math.max(1, Math.ceil(targetDur)), codec: 'avc1' as const }
@@ -628,10 +639,17 @@ export default function DirectorCamera() {
       captured = true;
       logBeta('recording', 'completed');
       const dur = Math.max(0.1, (Date.now() - clipStart.current) / 1000);
-      const frameBase64 = Platform.OS === 'web' ? await captureFrame() : recordingFrame.current;
-      if (!frameBase64) throw new Error('Could not capture the clip preview. Reopen the camera and record again.');
+      let frameBase64 = Platform.OS === 'web' ? await captureFrame() : recordingFrame.current;
+      if (!frameBase64 && Platform.OS !== 'web' && recorded.uri) {
+        try {
+          const thumbnail = await VideoThumbnails.getThumbnailAsync(recorded.uri, { time: 500, quality: 0.6 });
+          frameBase64 = await FileSystem.readAsStringAsync(thumbnail.uri, { encoding: FileSystem.EncodingType.Base64 });
+        } catch (error) {
+          console.warn('Could not make a review frame from the recorded clip:', error);
+        }
+      }
       if (id) {
-        const q = await api.clipQuality(id, shotIndex, frameBase64, dur, {
+        const q = await api.clipQuality(id, shotIndex, frameBase64 || '', dur, {
           uri: recorded.uri, blob: recorded.blob, mimeType: recorded.mimeType,
         }, brightness, (review) => {
           if (shotIndexRef.current === shotIndex) {
@@ -673,19 +691,19 @@ export default function DirectorCamera() {
     if (!id) return;
     const clips = project?.clips || [];
     const storyboard = project?.storyboard || [];
-    const needsShot = (index: number) => storyboard[index]?.status !== 'skipped'
-      && (!clips.some((clip: any) => Number(clip.shot_index) === index) || storyboard[index]?.status === 'retake');
-    const afterCurrent = storyboard.findIndex((_item: any, index: number) => index > shotIndex && needsShot(index));
-    const anyPending = afterCurrent >= 0 ? afterCurrent : storyboard.findIndex((_item: any, index: number) => needsShot(index));
-    if (anyPending >= 0) {
-      shotIndexRef.current = anyPending;
-      setShotIndex(anyPending);
+    const afterCurrent = nextUnfilmedShotIndex(storyboard, clips, shotIndex);
+    if (afterCurrent >= 0) {
+      shotIndexRef.current = afterCurrent;
+      setShotIndex(afterCurrent);
       setQuality(null);
       setCameraError(null);
       return;
     }
     setQuality(null);
-    router.replace({ pathname: '/project/[id]/export', params: { id } });
+    router.replace({
+      pathname: '/project/[id]/export',
+      params: { id, ...(editorRetake ? { clip: String(shotIndex) } : {}) },
+    });
   };
 
   const retake = async () => {
@@ -764,12 +782,7 @@ export default function DirectorCamera() {
   };
   const currentMovement = String(shotObj?.camera_movement || 'static').toLowerCase().trim().replace(/[\s-]+/g, '_');
   const storyboardShots = project?.storyboard || [];
-  const savedShotIndexes = new Set((project?.clips || []).map((clip: any) => Number(clip.shot_index)));
-  const needsShot = (index: number) => storyboardShots[index]?.status !== 'skipped'
-    && (!savedShotIndexes.has(index) || storyboardShots[index]?.status === 'retake');
-  const nextUnfilmedAfterCurrent = storyboardShots.findIndex((_item: any, index: number) => index > shotIndex && needsShot(index));
-  const firstUnfilmedShot = storyboardShots.findIndex((_item: any, index: number) => needsShot(index));
-  const upcomingShot = nextUnfilmedAfterCurrent >= 0 ? nextUnfilmedAfterCurrent : firstUnfilmedShot;
+  const upcomingShot = nextUnfilmedShotIndex(storyboardShots, project?.clips || [], shotIndex);
   const hasUpcomingShot = upcomingShot >= 0;
   const movementLabel = ['static', 'pan_left', 'pan_right', 'tilt_up', 'tilt_down', 'dolly_in', 'dolly_out', 'tracking', 'orbit', 'reveal', 'handheld'].includes(currentMovement)
     ? t(`move_${currentMovement}`) : t('hold_camera_steady');

@@ -14,6 +14,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 
 import { api } from '@/src/api';
+import { isClipProgress, shouldAdvanceOnEndEvent } from '@/src/reelPlayback';
+import { locateTimelinePosition, splitTimelineRange } from '@/src/timeline';
 import { theme } from '@/src/theme';
 
 type ClipEdit = {
@@ -23,6 +25,7 @@ type ClipEdit = {
   trim_end_seconds: number;
   filter_preset: string;
   brightness: number;
+  playback_rate: number;
 };
 
 type CaptionEdit = {
@@ -43,6 +46,7 @@ type EditorSettings = {
   editing_style: string;
   clip_order: number[];
   clip_edits: ClipEdit[];
+  clip_splits: Record<number, number[]>;
   title_text: string;
   title_font: string;
   title_position: string;
@@ -75,7 +79,7 @@ const CLIP_FILTERS = [
 
 const DEFAULT_SETTINGS: EditorSettings = {
   aspect_ratio: '9:16', fit_mode: 'fill', resolution: '1080p', fps: 30, editing_style: 'cinematic',
-  clip_order: [], clip_edits: [], title_text: '', title_font: 'sans',
+  clip_order: [], clip_edits: [], clip_splits: {}, title_text: '', title_font: 'sans',
   title_position: 'bottom', title_color: 'white', title_size: 'medium',
   music_volume: 25, voiceover_volume: 100, original_volume: 80, captions_enabled: false, caption_edits: [],
 };
@@ -129,12 +133,13 @@ function makeSettings(project: any): EditorSettings {
       trim_end_seconds: end,
       filter_preset: CLIP_FILTERS.some((filter) => filter.id === old?.filter_preset) ? old.filter_preset : 'original',
       brightness: Math.max(-0.5, Math.min(0.5, Number(old?.brightness ?? clip?.brightness) || 0)),
+      playback_rate: [0.5, 0.75, 1, 1.25, 1.5, 2].includes(Number(old?.playback_rate)) ? Number(old.playback_rate) : 1,
     };
   });
   const captionEdits = clips.map((clip: any, index: number) => {
     const id = shotIndex(clip, index);
     const clipEdit = clipEdits.find((edit: ClipEdit) => edit.shot_index === id)!;
-    const clipWindow = Math.max(0.25, clipEdit.trim_end_seconds - clipEdit.trim_start_seconds);
+    const clipWindow = Math.max(0.25, clipEdit.trim_end_seconds - clipEdit.trim_start_seconds) / clipEdit.playback_rate;
     const old = Array.isArray(saved.caption_edits)
       ? saved.caption_edits.find((edit: any) => edit.shot_index === id) : null;
     const oldStart = Number(old?.start_seconds);
@@ -153,6 +158,15 @@ function makeSettings(project: any): EditorSettings {
       font: CAPTION_FONTS.some(([font]) => font === old?.font) ? old.font : 'sans',
     };
   });
+  const clipSplits: Record<number, number[]> = {};
+  for (const edit of clipEdits) {
+    const rawPoints = saved.clip_splits?.[edit.shot_index] || saved.clip_splits?.[String(edit.shot_index)] || [];
+    if (Array.isArray(rawPoints)) {
+      const points = [...new Set(rawPoints.map(Number).filter((point) => Number.isFinite(point)
+        && point > edit.trim_start_seconds + 0.25 && point < edit.trim_end_seconds - 0.25))].sort((a, b) => a - b);
+      if (points.length) clipSplits[edit.shot_index] = points;
+    }
+  }
   const musicVolume = Number(saved.music_volume);
   const voiceoverVolume = Number(saved.voiceover_volume);
   const originalVolume = Number(saved.original_volume);
@@ -167,12 +181,20 @@ function makeSettings(project: any): EditorSettings {
     caption_edits: captionEdits,
     clip_order: clipOrder,
     clip_edits: clipEdits,
+    clip_splits: clipSplits,
   };
 }
 
 function clock(value: number) {
   const seconds = Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function clipWindow(clip: any, shot: number, edit: ClipEdit, sourceDurations: Record<number, number>) {
+  const sourceDuration = sourceDurations[shot] || Number(clip?.duration_seconds) || 5;
+  const start = Math.min(sourceDuration, Math.max(0, edit.trim_start_seconds));
+  const end = Math.max(start, Math.min(sourceDuration, edit.trim_end_seconds));
+  return { start, end, duration: end - start };
 }
 
 export default function Export() {
@@ -182,12 +204,15 @@ export default function Export() {
   const [settings, setSettings] = useState<EditorSettings>(DEFAULT_SETTINGS);
   const [project, setProject] = useState<any>(null);
   const [selectedShot, setSelectedShot] = useState<number | null>(null);
+  const [activePlayerSlot, setActivePlayerSlot] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [playerDuration, setPlayerDuration] = useState(0);
+  const [sourceDurations, setSourceDurations] = useState<Record<number, number>>({});
   const [playing, setPlaying] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [rendering, setRendering] = useState(false);
+  const [autoEditing, setAutoEditing] = useState(false);
   const [renderStage, setRenderStage] = useState('');
   const [renderError, setRenderError] = useState('');
   const [notice, setNotice] = useState('');
@@ -199,6 +224,7 @@ export default function Export() {
   const [captionLayout, setCaptionLayout] = useState({ width: 0, height: 0 });
   const [timelineWidth, setTimelineWidth] = useState(0);
   const [addingClip, setAddingClip] = useState(false);
+  const [retakingClip, setRetakingClip] = useState(false);
   const [addClipError, setAddClipError] = useState('');
   const historyBack = useRef<EditorSettings[]>([]);
   const historyForward = useRef<EditorSettings[]>([]);
@@ -206,13 +232,20 @@ export default function Export() {
   const desiredTime = useRef(0);
   const desiredShot = useRef<number | null>(null);
   const autoAdvance = useRef(false);
+  const playbackFinished = useRef(false);
   const preparedPlayer = useRef<{ player: any; shot: number } | null>(null);
+  const loadedPlayerShot = useRef(-1);
+  const clipHasPlayed = useRef(false);
+  const clipStarted = useRef(false);
+  const sourceLoadedShot = useRef(-1);
+  const refreshedMediaShots = useRef(new Set<number>());
   const currentActiveShot = useRef(-1);
   const currentActiveUri = useRef<string | null>(null);
   const currentTrimStart = useRef(0);
   const currentClipEnd = useRef(0);
   const advanceRef = useRef<(sourcePlayer?: any) => boolean>(() => false);
   const currentPlayer = useRef<any>(null);
+  const activePlayerSlotRef = useRef(0);
   const timelineWidthRef = useRef(0);
   const timelineDurationRef = useRef(0);
   const timelinePositionRef = useRef(0);
@@ -222,9 +255,12 @@ export default function Export() {
   const dirtyRef = useRef(dirty);
   const selectedShotRef = useRef(selectedShot);
   const settingsRef = useRef(settings);
+  const autosaveFailedFor = useRef<EditorSettings | null>(null);
   settingsRef.current = settings;
   dirtyRef.current = dirty;
   selectedShotRef.current = selectedShot;
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
   const rot = useRef(new Animated.Value(0)).current;
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
 
@@ -276,6 +312,29 @@ export default function Export() {
   }, [id, clipParam]));
 
   useEffect(() => {
+    if (!id || !dirty || saving || rendering || retakingClip || autosaveFailedFor.current === settings) return undefined;
+    const timer = setTimeout(async () => {
+      const snapshot = settingsRef.current;
+      setSaving(true);
+      setRenderError('');
+      try {
+        await api.saveEditSettings(id, snapshot as any);
+        autosaveFailedFor.current = null;
+        if (settingsRef.current === snapshot) {
+          setDirty(false);
+          setNotice('Changes saved');
+        }
+      } catch (error: any) {
+        autosaveFailedFor.current = snapshot;
+        setRenderError(error.message || 'Could not save your edits. Check your connection and try again.');
+      } finally {
+        setSaving(false);
+      }
+    }, 900);
+    return () => clearTimeout(timer);
+  }, [dirty, id, rendering, retakingClip, saving, settings]);
+
+  useEffect(() => {
     if (!rendering) return;
     const animation = Animated.loop(Animated.timing(rot, {
       toValue: 1, duration: 2200, useNativeDriver: true, easing: Easing.linear,
@@ -294,6 +353,16 @@ export default function Export() {
     }
     return [...ordered, ...remaining];
   }, [clips, settings.clip_order]);
+  const orderedSegments = useMemo(() => orderedClips.flatMap((clip: any, index: number) => {
+    const shot = shotIndex(clip, index);
+    const edit = editForShot(settings, shot);
+    if (!edit.included || !clip.video_url) return [];
+    const window = clipWindow(clip, shot, edit, sourceDurations);
+    return splitTimelineRange(window.start, window.end, settings.clip_splits[shot] || []).map(({ start, end }, part) => ({
+      id: `${shot}:${part}:${start.toFixed(3)}`, clip, shot,
+      start, end, part,
+    }));
+  }), [orderedClips, settings, sourceDurations]);
   const activeClip = orderedClips.find((clip: any, index: number) => shotIndex(clip, index) === selectedShot)
     || orderedClips.find((clip: any, index: number) => editForShot(settings, shotIndex(clip, index)).included)
     || orderedClips[0];
@@ -302,34 +371,36 @@ export default function Export() {
   const activeStoryboard = activeShot >= 0 ? project?.storyboard?.[activeShot] : null;
   const openingClip = orderedClips.find((clip: any, index: number) => editForShot(settings, shotIndex(clip, index)).included);
   const openingShot = openingClip ? shotIndex(openingClip, orderedClips.indexOf(openingClip)) : -1;
-  const showTitleOverlay = !!settings.title_text && activeShot === openingShot
-    && currentTime - (activeEdit?.trim_start_seconds || 0) < 3.5;
-  const activeClipEnd = activeEdit?.trim_end_seconds ?? Number(activeClip?.duration_seconds ?? playerDuration);
   const activeVideoUri = activeClip?.video_url || null;
-  const activeTrimStart = activeEdit?.trim_start_seconds || 0;
   const activeSourceDuration = Number(activeClip?.duration_seconds) || 0;
+  const activeWindow = activeClip && activeEdit
+    ? clipWindow(activeClip, activeShot, activeEdit, sourceDurations)
+    : { start: 0, end: activeSourceDuration || playerDuration, duration: activeSourceDuration || playerDuration };
+  const showTitleOverlay = !!settings.title_text && activeShot === openingShot
+    && (currentTime - activeWindow.start) / (activeEdit?.playback_rate || 1) < 3.5;
+  const activeSegmentIndex = orderedSegments.findIndex((segment: any) => segment.shot === activeShot
+    && currentTime >= segment.start - 0.15 && currentTime < segment.end - 0.001);
+  const activeSegment = orderedSegments[activeSegmentIndex] || orderedSegments.find((segment: any) => segment.shot === activeShot);
+  const activeClipEnd = activeSegment?.end ?? activeWindow.end;
+  const activeTrimStart = activeSegment?.start ?? activeWindow.start;
   const captionText = activeStoryboard?.on_screen_text || '';
   const activeCaption = settings.caption_edits.find((edit) => edit.shot_index === activeShot)
-    || { shot_index: activeShot, start_seconds: 0, end_seconds: Math.max(0.25, activeClipEnd - activeTrimStart), position_x: 50, position_y: 84, size: 'medium', font: 'sans' };
-  const captionLocalTime = Math.max(0, currentTime - activeTrimStart);
+    || { shot_index: activeShot, start_seconds: 0, end_seconds: Math.max(0.25, activeWindow.duration / (activeEdit?.playback_rate || 1)), position_x: 50, position_y: 84, size: 'medium', font: 'sans' };
+  const captionLocalTime = Math.max(0, currentTime - activeWindow.start) / (activeEdit?.playback_rate || 1);
   const captionIsInTime = captionLocalTime >= activeCaption.start_seconds && captionLocalTime <= activeCaption.end_seconds;
   const captionValuesRef = useRef(activeCaption);
   captionValuesRef.current = activeCaption;
   const activeFilter = activeEdit?.filter_preset || 'original';
-  const activeIndex = activeClip ? orderedClips.indexOf(activeClip) : -1;
-  const nextIncludedClip = orderedClips.slice(activeIndex + 1).find((clip: any, index: number) =>
-    editForShot(settings, shotIndex(clip, activeIndex + 1 + index)).included && !!clip.video_url);
-  const nextIncludedShot = nextIncludedClip ? shotIndex(nextIncludedClip, orderedClips.indexOf(nextIncludedClip)) : null;
-  const fullTimelineDuration = orderedClips.reduce((total: number, clip: any, index: number) => {
-    const edit = editForShot(settings, shotIndex(clip, index));
-    return edit.included && clip.video_url ? total + Math.max(0, edit.trim_end_seconds - edit.trim_start_seconds) : total;
-  }, 0);
-  const timelinePosition = orderedClips.slice(0, Math.max(0, activeIndex)).reduce((total: number, clip: any, index: number) => {
-    const edit = editForShot(settings, shotIndex(clip, index));
-    return edit.included && clip.video_url ? total + Math.max(0, edit.trim_end_seconds - edit.trim_start_seconds) : total;
-  }, 0) + (activeEdit?.included && activeClip?.video_url
-    ? Math.max(0, currentTime - (activeEdit.trim_start_seconds || 0))
-    : 0);
+  const nextSegment = activeSegmentIndex >= 0 ? orderedSegments[activeSegmentIndex + 1] : undefined;
+  const nextIncludedClip = nextSegment?.clip || null;
+  const nextIncludedShot = nextSegment?.shot ?? null;
+  const nextVideoUri = nextIncludedShot !== activeShot ? nextIncludedClip?.video_url || null : null;
+  const segmentDuration = (segment: any) => (segment.end - segment.start) / editForShot(settings, segment.shot).playback_rate;
+  const fullTimelineDuration = orderedSegments.reduce((total: number, segment: any) => total + segmentDuration(segment), 0);
+  const timelinePosition = orderedSegments.slice(0, Math.max(0, activeSegmentIndex)).reduce((total: number, segment: any) => total + segmentDuration(segment), 0)
+    + (activeSegment && activeEdit
+      ? Math.min(segmentDuration(activeSegment), Math.max(0, currentTime - activeTrimStart) / activeEdit.playback_rate)
+      : 0);
   currentActiveShot.current = activeShot;
   currentActiveUri.current = activeVideoUri;
   currentTrimStart.current = activeTrimStart;
@@ -348,11 +419,33 @@ export default function Export() {
   const previewMediaWidth = Math.min(windowWidth, previewHeight * outputRatio);
   const previewMediaHeight = Math.min(previewHeight, windowWidth / outputRatio);
 
-  const player = useVideoPlayer(activeClip?.video_url || null, (videoPlayer) => {
+  const configurePlayer = (videoPlayer: any) => {
     videoPlayer.loop = false;
     videoPlayer.muted = true;
     videoPlayer.timeUpdateEventInterval = 0.12;
-  });
+    if (Platform.OS === 'android') {
+      // The OnePlus 6T hit the Android heap limit while ExoPlayer buffered a
+      // remote MP4. Bound both players so preloading the next cut stays light.
+      videoPlayer.bufferOptions = {
+        preferredForwardBufferDuration: 3,
+        minBufferForPlayback: 0.75,
+        maxBufferBytes: 6 * 1024 * 1024,
+        prioritizeTimeOverSizeThreshold: false,
+      };
+    } else if (Platform.OS === 'ios') {
+      videoPlayer.bufferOptions = { preferredForwardBufferDuration: 3 };
+    }
+  };
+  // Keep the upcoming clip prepared on a second native player so the reel can
+  // switch at the cut without waiting for a remote video to load.
+  const playerAUri = activePlayerSlot === 0 ? activeVideoUri : nextVideoUri;
+  const playerBUri = activePlayerSlot === 1 ? activeVideoUri : nextVideoUri;
+  const playerA = useVideoPlayer(playerAUri, configurePlayer);
+  const playerB = useVideoPlayer(playerBUri, configurePlayer);
+  const player = activePlayerSlot === 0 ? playerA : playerB;
+  const standbyPlayer = activePlayerSlot === 0 ? playerB : playerA;
+  const standbyUri = activePlayerSlot === 0 ? playerBUri : playerAUri;
+  activePlayerSlotRef.current = activePlayerSlot;
   currentPlayer.current = player;
 
   const preparePlayer = useCallback((targetPlayer: any) => {
@@ -363,34 +456,80 @@ export default function Export() {
     const start = desiredShot.current === shot ? desiredTime.current : currentTrimStart.current;
     const safeStart = Math.min(start, Math.max(0, (targetPlayer.duration || start + 0.05) - 0.05));
     targetPlayer.currentTime = safeStart;
+    clipHasPlayed.current = false;
+    clipStarted.current = false;
+    loadedPlayerShot.current = shot;
     setCurrentTime(safeStart);
     if (autoAdvance.current) {
-      autoAdvance.current = false;
       targetPlayer.play();
       setPlaying(true);
     }
   }, []);
 
+  const refreshFailedMedia = useCallback((failedPlayer: any) => {
+    const shot = currentActiveShot.current;
+    const failedUri = currentActiveUri.current;
+    if (failedPlayer !== currentPlayer.current || shot < 0 || !failedUri) return;
+    if (refreshedMediaShots.current.has(shot)) {
+      autoAdvance.current = false;
+      setPlaying(false);
+      setRenderError('This clip could not load. Check your connection and try again.');
+      return;
+    }
+
+    refreshedMediaShots.current.add(shot);
+    const resumeAfterRefresh = playingRef.current || autoAdvance.current || failedPlayer.playing;
+    autoAdvance.current = resumeAfterRefresh;
+    desiredShot.current = shot;
+    desiredTime.current = currentTrimStart.current;
+    api.getProject(id).then((loaded) => {
+      const clip = (loaded.clips || []).find((item: any, index: number) => shotIndex(item, index) === shot);
+      if (!clip?.video_url || clip.video_url === failedUri) throw new Error('The clip link could not be refreshed.');
+      setProject(loaded);
+      setRenderError('');
+    }).catch(() => {
+      if (currentActiveShot.current !== shot) return;
+      autoAdvance.current = false;
+      setPlaying(false);
+      setRenderError('This clip could not load. Check your connection and try again.');
+    });
+  }, [id]);
+
   const advanceToNextClip = useCallback((sourcePlayer?: any) => {
     if (sourcePlayer && sourcePlayer !== currentPlayer.current) return true;
     if (autoAdvance.current) return true;
+    if (nextSegment && nextIncludedShot === activeShot) {
+      desiredShot.current = activeShot;
+      desiredTime.current = nextSegment.start;
+      player.currentTime = nextSegment.start;
+      setCurrentTime(nextSegment.start);
+      return true;
+    }
     if (nextIncludedClip && nextIncludedShot !== null) {
-      const start = editForShot(settings, nextIncludedShot).trim_start_seconds;
+      const start = nextSegment?.start ?? editForShot(settings, nextIncludedShot).trim_start_seconds;
       autoAdvance.current = true;
       desiredShot.current = nextIncludedShot;
       desiredTime.current = start;
+      activePlayerSlotRef.current = 1 - activePlayerSlotRef.current;
+      setActivePlayerSlot(activePlayerSlotRef.current);
       setSelectedShot(nextIncludedShot);
       setCurrentTime(start);
       player.pause();
       return true;
     }
+    playbackFinished.current = true;
     player.pause();
     setPlaying(false);
     return false;
-  }, [nextIncludedClip, nextIncludedShot, player, settings]);
+  }, [activeShot, nextIncludedClip, nextIncludedShot, nextSegment, player, settings]);
   advanceRef.current = advanceToNextClip;
 
   useEffect(() => {
+    playbackFinished.current = false;
+    preparedPlayer.current = null;
+    loadedPlayerShot.current = -1;
+    sourceLoadedShot.current = activeVideoUri ? activeShot : -1;
+    player.pause();
     if (!activeVideoUri) {
       setCurrentTime(0);
       setPlayerDuration(0);
@@ -402,14 +541,53 @@ export default function Export() {
     desiredTime.current = start;
     setCurrentTime(start);
     setPlayerDuration(Math.max(0, activeSourceDuration));
-    player.pause();
-    setPlaying(false);
-    preparePlayer(player);
   }, [activeVideoUri, activeTrimStart, activeSourceDuration, activeShot, player, preparePlayer]);
 
   useEffect(() => {
+    if (standbyPlayer.playing) standbyPlayer.pause();
+  }, [standbyPlayer, standbyUri]);
+
+  useEffect(() => {
+    player.playbackRate = activeEdit?.playback_rate || 1;
+  }, [activeEdit?.playback_rate, player]);
+
+  useEffect(() => {
+    if (!activeVideoUri || !autoAdvance.current) return;
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const startWhenReady = () => {
+      if (currentActiveShot.current !== activeShot || !autoAdvance.current) return;
+      if (player.status === 'readyToPlay') {
+        if (preparedPlayer.current?.player === player && preparedPlayer.current?.shot === activeShot) {
+          if (!player.playing) player.play();
+        } else {
+          preparePlayer(player);
+        }
+      }
+      if (autoAdvance.current && attempts++ < 80) timer = setTimeout(startWhenReady, 100);
+    };
+    timer = setTimeout(startWhenReady, 100);
+    return () => clearTimeout(timer);
+  }, [activeVideoUri, activeShot, player, preparePlayer]);
+
+  useEffect(() => {
     const timeSub = player.addListener('timeUpdate', ({ currentTime: time }) => {
+      if (player !== currentPlayer.current) return;
+      if (playbackFinished.current) return;
+      if (loadedPlayerShot.current !== currentActiveShot.current) return;
       const clipEnd = currentClipEnd.current;
+      // A native player can send the previous source's last timestamps just
+      // after a source replacement. Ignore it unless it belongs to the active player.
+      if (!clipStarted.current) {
+        if (time < currentTrimStart.current - 0.25 || time > clipEnd + 0.24) return;
+        clipStarted.current = true;
+      }
+      // The player can emit one final timestamp from the outgoing source just
+      // after a replacement. Count progress only inside this clip's window.
+      // Ignore timestamps beyond the current clip's end; they belong to the
+      // previous source and must not finish a shorter incoming clip.
+      if (time > clipEnd + 0.24) return;
+      if (isClipProgress(time, currentTrimStart.current, clipEnd)) clipHasPlayed.current = true;
       if (time >= clipEnd - 0.04) {
         if (!advanceRef.current(player)) {
           player.currentTime = clipEnd;
@@ -419,20 +597,52 @@ export default function Export() {
         setCurrentTime(time);
       }
     });
-    const sourceSub = player.addListener('sourceLoad', ({ duration }) => {
+    const sourceSub = player.addListener('sourceLoad', ({ duration, videoSource }) => {
+      if (player !== currentPlayer.current) return;
       setPlayerDuration(duration || 0);
-      preparePlayer(player);
+      const uri = typeof videoSource === 'string'
+        ? videoSource
+        : videoSource && typeof videoSource === 'object' ? videoSource.uri : null;
+      if (uri && uri === currentActiveUri.current) {
+        const shot = currentActiveShot.current;
+        sourceLoadedShot.current = shot;
+        if (duration > 0) setSourceDurations((current) => current[shot] === duration ? current : { ...current, [shot]: duration });
+        preparePlayer(player);
+      }
     });
     const statusSub = player.addListener('statusChange', ({ status }) => {
-      if (status === 'readyToPlay') preparePlayer(player);
+      if (player !== currentPlayer.current) return;
+      const shot = currentActiveShot.current;
+      if (status === 'readyToPlay' && sourceLoadedShot.current === shot) {
+        setTimeout(() => {
+          if (sourceLoadedShot.current === shot && currentActiveShot.current === shot) preparePlayer(player);
+        }, 0);
+      } else if (status === 'error') {
+        refreshFailedMedia(player);
+      }
     });
-    const playingSub = player.addListener('playingChange', ({ isPlaying }) => setPlaying(isPlaying));
-    const endSub = player.addListener('playToEnd', () => advanceRef.current(player));
+    const playingSub = player.addListener('playingChange', ({ isPlaying }) => {
+      if (player === currentPlayer.current) {
+        setPlaying(isPlaying);
+        if (isPlaying) autoAdvance.current = false;
+      }
+    });
+    const endSub = player.addListener('playToEnd', () => {
+      if (player !== currentPlayer.current) return;
+      if (loadedPlayerShot.current !== currentActiveShot.current) return;
+      // A playToEnd from the previous source can arrive after the next clip has
+      // loaded. Ignore it until the current clip itself has reached its end.
+      // Trust this loaded player's end event even when saved duration metadata
+      // is longer than the actual file; source/player guards above reject stale ends.
+      if (!shouldAdvanceOnEndEvent(clipHasPlayed.current)) return;
+      advanceRef.current(player);
+    });
     // A short clip can finish before React attaches listeners to its new player.
     // Check readiness after subscribing so the next segment still starts.
-    preparePlayer(player);
+    if (sourceLoadedShot.current === currentActiveShot.current) preparePlayer(player);
+    if (player.status === 'error') refreshFailedMedia(player);
     return () => { timeSub.remove(); sourceSub.remove(); statusSub.remove(); playingSub.remove(); endSub.remove(); };
-  }, [player, preparePlayer]);
+  }, [player, preparePlayer, refreshFailedMedia]);
 
   const pushHistory = (current: EditorSettings) => {
     historyBack.current = [...historyBack.current.slice(-39), current];
@@ -456,7 +666,7 @@ export default function Export() {
       const caption_edits = clipEdit
         ? current.caption_edits.map((caption) => {
           if (caption.shot_index !== shot) return caption;
-          const available = Math.max(0.25, clipEdit.trim_end_seconds - clipEdit.trim_start_seconds);
+          const available = Math.max(0.25, (clipEdit.trim_end_seconds - clipEdit.trim_start_seconds) / clipEdit.playback_rate);
           const start = Math.max(0, Math.min(available - 0.15, caption.start_seconds));
           return { ...caption, start_seconds: start, end_seconds: Math.max(start + 0.15, Math.min(available, caption.end_seconds)) };
         })
@@ -506,7 +716,7 @@ export default function Export() {
   }), [activeShot, captionLayout.height, captionLayout.width, captionPositionMode, previewMediaHeight, previewMediaWidth]);
 
   const adjustCaptionTime = (field: 'start_seconds' | 'end_seconds', delta: number) => {
-    const duration = Math.max(0.25, (activeEdit?.trim_end_seconds || 0) - (activeEdit?.trim_start_seconds || 0));
+    const duration = Math.max(0.25, ((activeEdit?.trim_end_seconds || 0) - (activeEdit?.trim_start_seconds || 0)) / (activeEdit?.playback_rate || 1));
     if (field === 'start_seconds') {
       updateCaption(activeShot, { start_seconds: Math.max(0, Math.min(activeCaption.end_seconds - 0.15, Math.round((activeCaption.start_seconds + delta) * 10) / 10)) });
     } else {
@@ -534,16 +744,19 @@ export default function Export() {
     Haptics.selectionAsync().catch(() => {});
   };
 
-  const selectClip = (shot: number) => {
+  const selectClip = (shot: number, segmentStart?: number) => {
+    refreshedMediaShots.current.delete(shot);
     autoAdvance.current = false;
+    playbackFinished.current = false;
     setCaptionPositionMode(false);
     desiredShot.current = shot;
     setSelectedShot(shot);
     const edit = editForShot(settings, shot);
-    desiredTime.current = edit.trim_start_seconds;
-    setCurrentTime(edit.trim_start_seconds);
+    const start = segmentStart ?? edit.trim_start_seconds;
+    desiredTime.current = start;
+    setCurrentTime(start);
     player.pause();
-    player.currentTime = edit.trim_start_seconds;
+    player.currentTime = start;
     setPlaying(false);
   };
 
@@ -554,6 +767,7 @@ export default function Export() {
       player.pause();
       setPlaying(false);
     } else {
+      playbackFinished.current = false;
       autoAdvance.current = false;
       if (currentTime >= activeClipEnd - 0.05) {
         player.currentTime = activeEdit?.trim_start_seconds || 0;
@@ -565,10 +779,12 @@ export default function Export() {
   };
 
   const playFullReel = () => {
-    const firstClip = orderedClips.find((clip: any, index: number) => editForShot(settings, shotIndex(clip, index)).included && !!clip.video_url);
-    if (!firstClip) return;
-    const firstShot = shotIndex(firstClip, orderedClips.indexOf(firstClip));
-    const start = editForShot(settings, firstShot).trim_start_seconds;
+    const firstSegment = orderedSegments[0];
+    if (!firstSegment) return;
+    const firstShot = firstSegment.shot;
+    const start = firstSegment.start;
+    playbackFinished.current = false;
+    refreshedMediaShots.current.clear();
     autoAdvance.current = false;
     setCaptionPositionMode(false);
     if (player.playing) player.pause();
@@ -588,25 +804,19 @@ export default function Export() {
 
   const seekTimelineTo = (timelineTime: number) => {
     if (fullTimelineDuration <= 0) return;
+    playbackFinished.current = false;
     const boundedTime = Math.max(0, Math.min(fullTimelineDuration, timelineTime));
-    const included = orderedClips
-      .map((clip: any, index: number) => ({ clip, shot: shotIndex(clip, index), edit: editForShot(settings, shotIndex(clip, index)) }))
-      .filter(({ clip, edit }) => edit.included && !!clip.video_url);
+    const included = orderedSegments;
     if (!included.length) return;
 
-    let remaining = boundedTime;
-    let target = included[included.length - 1];
-    let sourceTime = target.edit.trim_end_seconds;
-    for (const item of included) {
-      const duration = Math.max(0.05, item.edit.trim_end_seconds - item.edit.trim_start_seconds);
-      target = item;
-      if (remaining <= duration) {
-        sourceTime = item.edit.trim_start_seconds + remaining;
-        break;
-      }
-      remaining -= duration;
-      sourceTime = item.edit.trim_end_seconds;
-    }
+    const position = locateTimelinePosition(included.map((item) => ({
+      start: item.start,
+      end: item.end,
+      playbackRate: editForShot(settings, item.shot).playback_rate,
+    })), boundedTime);
+    if (!position) return;
+    const target = included[position.index];
+    const sourceTime = position.sourceTime;
 
     autoAdvance.current = false;
     setCaptionPositionMode(false);
@@ -655,6 +865,23 @@ export default function Export() {
     }
   };
 
+  const splitAtPlayhead = () => {
+    if (!activeSegment || currentTime < activeSegment.start + 0.25 || currentTime > activeSegment.end - 0.25) {
+      setNotice('Move the playhead at least 0.25 seconds inside the selected clip to split it.');
+      return;
+    }
+    const points = settings.clip_splits[activeShot] || [];
+    if (points.some((point) => Math.abs(point - currentTime) < 0.15)) {
+      setNotice('This clip is already split at that point.');
+      return;
+    }
+    update('clip_splits', {
+      ...settings.clip_splits,
+      [activeShot]: [...points, currentTime].sort((a, b) => a - b),
+    });
+    setNotice('Clip split at the playhead');
+  };
+
   const moveClip = (shot: number, direction: -1 | 1) => {
     const currentOrder = [...settings.clip_order];
     const index = currentOrder.indexOf(shot);
@@ -670,6 +897,7 @@ export default function Export() {
     setRenderError('');
     try {
       await api.saveEditSettings(id, settings as any);
+      autosaveFailedFor.current = null;
       setDirty(false);
       setNotice('Changes saved');
     } catch (error: any) {
@@ -698,6 +926,46 @@ export default function Export() {
     } finally {
       setRendering(false);
       setRenderStage('');
+    }
+  };
+
+  const makeMyReel = async () => {
+    if (!id || autoEditing || rendering || saving) return;
+    setAutoEditing(true);
+    setToolError('');
+    try {
+      const suggestion = await api.autoEdit(id, settings.editing_style);
+      setSettings((current) => {
+        pushHistory(current);
+        const suggestions = new Map((suggestion.clip_edits || []).map((edit: ClipEdit) => [edit.shot_index, edit]));
+        const clip_edits = current.clip_edits.map((edit) => ({ ...edit, ...(suggestions.get(edit.shot_index) || {}) }));
+        const clip_splits = Object.fromEntries(Object.entries(current.clip_splits).map(([shot, points]) => {
+          const edit = clip_edits.find((item) => item.shot_index === Number(shot));
+          return [shot, edit ? points.filter((point) => point > edit.trim_start_seconds && point < edit.trim_end_seconds) : []];
+        }).filter(([, points]) => points.length));
+        const caption_edits = current.caption_edits.map((caption) => {
+          const edit = clip_edits.find((item) => item.shot_index === caption.shot_index);
+          if (!edit) return caption;
+          const available = Math.max(0.25, (edit.trim_end_seconds - edit.trim_start_seconds) / edit.playback_rate);
+          const start = Math.max(0, Math.min(available - 0.15, caption.start_seconds));
+          return { ...caption, start_seconds: start, end_seconds: Math.max(start + 0.15, Math.min(available, caption.end_seconds)) };
+        });
+        return {
+          ...current,
+          clip_order: suggestion.clip_order,
+          clip_edits,
+          clip_splits,
+          caption_edits,
+          editing_style: suggestion.editing_style,
+        };
+      });
+      setDirty(true);
+      setNotice(suggestion.summary || 'AI first cut is ready to preview.');
+      setTool(null);
+    } catch (error: any) {
+      setToolError(error.message || 'AI could not prepare a first cut. Your edits are safe.');
+    } finally {
+      setAutoEditing(false);
     }
   };
 
@@ -734,6 +1002,27 @@ export default function Export() {
     } catch (error: any) {
       setAddClipError(error.message || 'Could not add another clip.');
     } finally { setAddingClip(false); }
+  };
+
+  const retakeClip = async () => {
+    if (!id || activeShot < 0 || retakingClip || saving || rendering) return;
+    setRetakingClip(true);
+    setToolError('');
+    try {
+      if (dirty) {
+        await api.saveEditSettings(id, settings as any);
+        setDirty(false);
+      }
+      setTool(null);
+      router.push({
+        pathname: '/project/[id]/camera',
+        params: { id, shot: String(activeShot), retake: '1' },
+      });
+    } catch (error: any) {
+      setToolError(error.message || 'Could not open this shot for a retake.');
+    } finally {
+      setRetakingClip(false);
+    }
   };
 
   const openTool = (name: ToolName) => {
@@ -856,8 +1145,9 @@ export default function Export() {
   };
 
   const estimatedDuration = orderedClips.reduce((total: number, clip: any, index: number) => {
-    const edit = editForShot(settings, shotIndex(clip, index));
-    return edit.included ? total + Math.max(0, edit.trim_end_seconds - edit.trim_start_seconds) : total;
+    const shot = shotIndex(clip, index);
+    const edit = editForShot(settings, shot);
+    return edit.included ? total + clipWindow(clip, shot, edit, sourceDurations).duration / edit.playback_rate : total;
   }, 0) * (settings.editing_style === 'fast_pace' ? 0.8 : 1);
   const includedCount = orderedClips.filter((clip: any, index: number) => editForShot(settings, shotIndex(clip, index)).included).length;
 
@@ -895,7 +1185,7 @@ export default function Export() {
                 style={[StyleSheet.absoluteFill, Platform.OS === 'web' && webPreviewFilter ? ({ filter: webPreviewFilter } as any) : null]}
                 contentFit={settings.fit_mode === 'fit' ? 'contain' : 'cover'}
                 nativeControls={false}
-                allowsFullscreen={false}
+                fullscreenOptions={{ enable: false }}
               />
             ) : (
               <View style={styles.previewEmpty}>
@@ -990,20 +1280,21 @@ export default function Export() {
           <View style={styles.clipTrack}>
             {orderedClips.length ? (
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.clipStrip}>
-                {orderedClips.map((clip: any, index: number) => {
-                  const shot = shotIndex(clip, index);
+                {orderedSegments.map((segment: any, index: number) => {
+                  const { clip, shot, start, part, id: segmentId } = segment;
                   const duration = Math.max(0.5, Number(clip.duration_seconds) || 5);
                   const edit = editForShot(settings, shot);
-                  const selected = shot === activeShot;
+                  const selected = shot === activeShot && segmentId === activeSegment?.id;
                   return (
                     <TimelineClip
-                      key={`${shot}-${clip.video_storage_path || index}`}
+                      key={segmentId}
                       clip={clip}
                       shot={shot}
                       duration={duration}
                       edit={edit}
                       selected={selected}
-                      onSelect={() => selectClip(shot)}
+                      segmentLabel={`${shot + 1}${String.fromCharCode(97 + part)}`}
+                      onSelect={() => selectClip(shot, start)}
                       onTrim={(values) => updateClip(shot, values)}
                     />
                   );
@@ -1031,7 +1322,7 @@ export default function Export() {
                   const duration = Math.max(0.5, Number(clip.duration_seconds) || 5);
                   const edit = editForShot(settings, shot);
                   const caption = settings.caption_edits.find((item) => item.shot_index === shot)
-                    || { shot_index: shot, start_seconds: 0, end_seconds: Math.max(0.25, edit.trim_end_seconds - edit.trim_start_seconds), position_x: 50, position_y: 84, size: 'medium', font: 'sans' };
+                    || { shot_index: shot, start_seconds: 0, end_seconds: Math.max(0.25, (edit.trim_end_seconds - edit.trim_start_seconds) / edit.playback_rate), position_x: 50, position_y: 84, size: 'medium', font: 'sans' };
                   return (
                     <TimelineCaption
                       key={`caption-${shot}`}
@@ -1198,12 +1489,20 @@ export default function Export() {
 
         {tool === 'Filter' ? (
           <>
-            <Text style={styles.sheetDescription}>Apply a look to the whole reel or a filter to just the selected clip.</Text>
+            <Text style={styles.sheetDescription}>Let AI shape a first cut from your shot plan and saved shot reviews, then preview it and adjust anything.</Text>
+            <ActionButton icon="sparkles-outline" label="Make my reel" onPress={() => void makeMyReel()} loading={autoEditing} />
+            {!!toolError && <Text style={styles.inlineError} accessibilityRole="alert">{toolError}</Text>}
+            <Text style={styles.sheetDescription}>Choose a look for the whole reel or a filter for just this clip.</Text>
             <Text style={styles.rowLabel}>WHOLE REEL LOOK</Text>
             <View style={styles.choiceGrid}>{LOOKS.map((look) => <Choice key={look.id} label={look.label} active={settings.editing_style === look.id} onPress={() => update('editing_style', look.id)} />)}</View>
             {!!activeEdit && (
               <>
                 <Text style={styles.rowLabel}>SELECTED CLIP · {Math.max(0, orderedClips.findIndex((clip: any) => shotIndex(clip, -1) === activeShot)) + 1}</Text>
+                <Text style={styles.rowLabel}>SPEED</Text>
+                <ChoiceRow options={[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => [String(rate), `${rate}×`] as string[])} selected={String(activeEdit.playback_rate)} onSelect={(value) => updateClip(activeShot, { playback_rate: Number(value) })} />
+                <Pressable style={styles.actionButton} onPress={splitAtPlayhead} accessibilityRole="button" accessibilityLabel="Split clip at playhead">
+                  <Ionicons name="cut-outline" size={18} color="#fff" /><Text style={styles.actionButtonText}>Split at playhead</Text>
+                </Pressable>
                 <View style={styles.choiceGrid}>{CLIP_FILTERS.map((filter) => <Choice key={filter.id} label={filter.label} active={activeEdit.filter_preset === filter.id} onPress={() => updateClip(activeShot, { filter_preset: filter.id })} />)}</View>
                 <View style={styles.trimSection}>
                   <View style={{ flex: 1 }}><Text style={styles.trimHeading}>Clip brightness</Text><Text style={styles.trimValueText}>{Math.round(activeEdit.brightness * 100)}%</Text></View>
@@ -1224,10 +1523,11 @@ export default function Export() {
                   <TrimControl label="IN" value={activeEdit.trim_start_seconds} onMinus={() => adjustTrim(activeShot, 'in', -0.5, Number(activeClip.duration_seconds) || 5)} onPlus={() => adjustTrim(activeShot, 'in', 0.5, Number(activeClip.duration_seconds) || 5)} />
                   <TrimControl label="OUT" value={activeEdit.trim_end_seconds} onMinus={() => adjustTrim(activeShot, 'out', -0.5, Number(activeClip.duration_seconds) || 5)} onPlus={() => adjustTrim(activeShot, 'out', 0.5, Number(activeClip.duration_seconds) || 5)} />
                 </View>
-                <Pressable style={styles.excludeRow} onPress={() => updateClip(activeShot, { included: !activeEdit.included })}>
+                <Pressable style={styles.excludeRow} onPress={() => updateClip(activeShot, { included: !activeEdit.included })} accessibilityRole="button">
                   <Ionicons name={activeEdit.included ? 'checkmark-circle-outline' : 'add-circle-outline'} size={20} color={activeEdit.included ? '#fff' : theme.color.brand} />
-                  <Text style={styles.excludeText}>{activeEdit.included ? 'Include this clip in export' : 'Add this clip to export'}</Text>
+                  <Text style={styles.excludeText}>{activeEdit.included ? 'Remove this clip from the reel' : 'Restore this clip to the reel'}</Text>
                 </Pressable>
+                <ActionButton icon="refresh-outline" label="Retake this shot" onPress={() => void retakeClip()} loading={retakingClip} />
               </>
             )}
           </>
@@ -1254,7 +1554,7 @@ export default function Export() {
 
 function editForShot(settings: EditorSettings, shot: number): ClipEdit {
   return settings.clip_edits.find((edit) => edit.shot_index === shot)
-    || { shot_index: shot, included: true, trim_start_seconds: 0, trim_end_seconds: 5, filter_preset: 'original', brightness: 0 };
+    || { shot_index: shot, included: true, trim_start_seconds: 0, trim_end_seconds: 5, filter_preset: 'original', brightness: 0, playback_rate: 1 };
 }
 
 function nativeTint(clipFilter: string, look: string) {
@@ -1287,11 +1587,11 @@ function ToolSheet({ visible, title, onClose, children }: { visible: boolean; ti
   );
 }
 
-function TimelineClip({ clip, shot, duration, edit, selected, onSelect, onTrim }: {
-  clip: any; shot: number; duration: number; edit: ClipEdit; selected: boolean;
+function TimelineClip({ clip, shot, duration, edit, selected, segmentLabel, onSelect, onTrim }: {
+  clip: any; shot: number; duration: number; edit: ClipEdit; selected: boolean; segmentLabel: string;
   onSelect: () => void; onTrim: (values: Partial<ClipEdit>) => void;
 }) {
-  const width = Math.min(220, Math.max(96, duration * 26));
+  const width = Math.min(220, Math.max(96, duration / edit.playback_rate * 26));
   const liveEdit = useRef(edit);
   const trimCallback = useRef(onTrim);
   liveEdit.current = edit;
@@ -1326,7 +1626,7 @@ function TimelineClip({ clip, shot, duration, edit, selected, onSelect, onTrim }
       <View pointerEvents="none" style={[styles.trimMask, { left: 0, width: `${leftPercent * 100}%` }]} />
       <View pointerEvents="none" style={[styles.trimMask, { right: 0, width: `${rightPercent * 100}%` }]} />
       {selected ? <View pointerEvents="none" style={[styles.selectedTrim, { left: `${leftPercent * 100}%`, right: `${rightPercent * 100}%` }]} /> : null}
-      <View style={styles.clipCellBadge}><Text style={styles.clipCellBadgeText}>{shot + 1}</Text></View>
+      <View style={styles.clipCellBadge}><Text style={styles.clipCellBadgeText}>{segmentLabel}</Text></View>
       {selected ? (
         <>
           <View {...leftPan.panHandlers} style={[styles.trimHandle, styles.trimHandleLeft, { left: `${leftPercent * 100}%` }]} accessibilityLabel="Drag to trim the start of this clip"><View style={styles.trimGrip} /></View>
@@ -1341,17 +1641,18 @@ function TimelineCaption({ duration, edit, caption, text, selected, enabled, onT
   duration: number; edit: ClipEdit; caption: CaptionEdit; text: string; selected: boolean; enabled: boolean;
   onTiming: (values: Partial<CaptionEdit>, recordHistory?: boolean) => void; onTimingStart: () => void; onSelect: () => void;
 }) {
-  const width = Math.min(220, Math.max(96, duration * 26));
-  const clipWindow = Math.max(0.25, edit.trim_end_seconds - edit.trim_start_seconds);
-  const left = Math.max(0, Math.min(width - 4, (edit.trim_start_seconds + caption.start_seconds) / duration * width));
-  const right = Math.max(left + 4, Math.min(width, (edit.trim_start_seconds + caption.end_seconds) / duration * width));
+  const timelineDuration = duration / edit.playback_rate;
+  const width = Math.min(220, Math.max(96, duration / edit.playback_rate * 26));
+  const clipWindow = Math.max(0.25, (edit.trim_end_seconds - edit.trim_start_seconds) / edit.playback_rate);
+  const left = Math.max(0, Math.min(width - 4, (edit.trim_start_seconds + caption.start_seconds * edit.playback_rate) / duration * width));
+  const right = Math.max(left + 4, Math.min(width, (edit.trim_start_seconds + caption.end_seconds * edit.playback_rate) / duration * width));
   const captionRef = useRef(caption);
-  const metricsRef = useRef({ width, duration, clipWindow });
+  const metricsRef = useRef({ width, duration: timelineDuration, clipWindow });
   const timingRef = useRef(onTiming);
   const timingStartRef = useRef(onTimingStart);
   const dragBase = useRef({ start: caption.start_seconds, end: caption.end_seconds });
   captionRef.current = caption;
-  metricsRef.current = { width, duration, clipWindow };
+  metricsRef.current = { width, duration: timelineDuration, clipWindow };
   timingRef.current = onTiming;
   timingStartRef.current = onTimingStart;
   const startHandle = useRef(PanResponder.create({

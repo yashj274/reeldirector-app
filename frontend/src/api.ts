@@ -791,6 +791,9 @@ export const api = {
     void rememberCreatorStyleChoice(updated);
     return { ok: true };
   },
+  autoEdit: async (id: string, style: string) => request(`/projects/${id}/auto-edit`, {
+    method: 'POST', body: JSON.stringify({ style }),
+  }),
   deleteProject: async (id: string) => {
     const user = await currentUser();
     const { data, error: readError } = await getSupabase().from('projects').select('data')
@@ -885,7 +888,7 @@ export const api = {
     const language = await getLanguage();
     const prefix = `${user.id}/${project_id}`;
     const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const frame_storage_path = `${prefix}/${stamp}.jpg`;
+    const frame_storage_path = frame_base64 ? `${prefix}/${stamp}.jpg` : null;
     if (!video.uri && !video.blob) throw new Error('The recorded video is missing. Record the shot again.');
     const inferredMimeType = video.uri?.toLowerCase().endsWith('.mov') ? 'video/quicktime' : 'video/mp4';
     const mimeType = (video.mimeType || video.blob?.type || inferredMimeType).split(';')[0].trim();
@@ -899,29 +902,33 @@ export const api = {
         ? video.blob
         : await new (await import('expo-file-system')).File(video.uri!).arrayBuffer();
       const [frameUpload, videoUpload] = await Promise.all([
-        storage.upload(frame_storage_path, decode(frame_base64), { contentType: 'image/jpeg', upsert: false }),
+        frame_storage_path
+          ? storage.upload(frame_storage_path, decode(frame_base64), { contentType: 'image/jpeg', upsert: false })
+          : Promise.resolve(null),
         storage.upload(video_storage_path, videoBytes, { contentType: mimeType, upsert: false }),
       ]);
-      if (!frameUpload.error) uploaded.push(frame_storage_path);
+      if (frameUpload && !frameUpload.error && frame_storage_path) uploaded.push(frame_storage_path);
       if (!videoUpload.error) uploaded.push(video_storage_path);
-      if (frameUpload.error) throw frameUpload.error;
+      if (frameUpload?.error) throw frameUpload.error;
       if (videoUpload.error) throw videoUpload.error;
 
       const pendingQuality = {
         overall_score: null, blur_score: null, exposure_score: null, composition_score: null,
         stability_score: null, subject_visible: null, issues: [], recommendation: 'keep',
-        review_available: false, review_pending: true,
-        reason: 'Your clip is saved. AI is checking the framing in the background.',
+        review_available: false, review_pending: !!frame_base64,
+        reason: frame_base64
+          ? 'Your clip is saved. AI is checking the framing in the background.'
+          : 'Your clip is saved. This device could not create a review frame, so automatic rating is unavailable.',
       };
       const [project, signedByPath] = await Promise.all([
         readProject(project_id),
-        signMediaPaths([frame_storage_path, video_storage_path]),
+        signMediaPaths([...(frame_storage_path ? [frame_storage_path] : []), video_storage_path]),
       ]);
       const clip = {
         shot_index, clip_id: stamp, duration_seconds, quality: pendingQuality,
         brightness: Math.max(-0.5, Math.min(0.5, brightness)), recorded_at: new Date().toISOString(),
         frame_storage_path, video_storage_path,
-        frame_url: signedByPath.get(frame_storage_path) || null,
+        frame_url: frame_storage_path ? signedByPath.get(frame_storage_path) || null : null,
         video_url: signedByPath.get(video_storage_path) || null,
       };
       const replacedClips = (project.clips || []).filter((item: any) => item.shot_index === shot_index);
@@ -934,6 +941,11 @@ export const api = {
       logBeta('upload', 'completed');
       void deleteStoredFrames(replacedClips.flatMap((item: any) => [item.frame_storage_path, item.video_storage_path]).filter(Boolean));
       onSaved?.(savedProject);
+
+      if (!frame_base64) {
+        onReview?.(pendingQuality);
+        return pendingQuality;
+      }
 
       // Let the creator move to the next shot while Gemini reviews this frame.
       logBeta('ai_request', 'started');
