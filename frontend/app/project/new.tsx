@@ -85,19 +85,6 @@ export default function NewProject() {
   }, [params.template]);
 
   useEffect(() => {
-    if (params.template || choicesTouched) return;
-    const defaults = inferDefaults(`${title} ${purpose}`);
-    setShootType(useMyStyle && !defaults.specific && creatorProfile?.project_count
-      ? (DEFAULT_TYPES.includes(creatorProfile.category) ? creatorProfile.category : defaults.category)
-      : defaults.category);
-    if (!useMyStyle) {
-      setMood(defaults.mood);
-      setDuration(defaults.duration);
-      setStyle(defaults.style);
-    }
-  }, [title, purpose, params.template, choicesTouched, useMyStyle, creatorProfile]);
-
-  useEffect(() => {
     const sequence = ++recommendationSequence.current;
     if (params.template || choicesTouched || useMyStyle || purpose.trim().length < 10) {
       setRecommendationState('idle');

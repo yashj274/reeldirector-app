@@ -1,5 +1,6 @@
 """Local smoke tests for ReelDirector services and media rendering."""
 import asyncio
+import json
 import subprocess
 import sys
 import tempfile
@@ -189,6 +190,38 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(result["script"], "Saved concept.")
         save_doc.assert_not_called()
 
+    def test_short_ai_storyboard_is_retried_before_fallback(self):
+        doc = {
+            "id": "p", "user_id": "u", "title": "Office tour", "shoot_type": "business",
+            "purpose": "A welcoming office tour", "mood": "Cinematic", "style": "cinematic",
+            "platform": "instagram_reel", "duration_seconds": 12, "audience": "general",
+            "storyboard": None,
+        }
+        shot = lambda index: {
+            "title": f"Office moment {index + 1}", "description": "Show a real part of this office.",
+            "purpose": "detail", "shotType": "wide", "duration": 3,
+            "cameraMovement": "static", "instruction": "Frame the space and hold steady.",
+        }
+        short_response = json.dumps({"concept": "A welcoming office story.", "shots": [shot(i) for i in range(3)]})
+        complete_response = json.dumps({"concept": "A welcoming office story.", "shots": [shot(i) for i in range(4)]})
+
+        async def fake_project(*_args):
+            return doc.copy()
+
+        async def save_doc(value, _user_id):
+            doc.update(value)
+
+        ai = AsyncMock(side_effect=[short_response, complete_response])
+        with patch.object(server, "fetch_project", fake_project), \
+             patch.object(server, "chat_once", ai), \
+             patch.object(server, "save_project", save_doc):
+            result = asyncio.run(server.generate_storyboard("p", user={"id": "u"}))
+
+        self.assertTrue(result["ai_generated"])
+        self.assertEqual(len(result["storyboard"]), 4)
+        self.assertEqual(ai.await_count, 2)
+        self.assertIn("last draft had only 3 shots", ai.await_args.args[1])
+
     def test_storyboard_endpoint_persists_fallback_when_ai_is_unavailable(self):
         doc = {
             "id": "p", "user_id": "u", "title": "Home tour", "shoot_type": "real_estate",
@@ -199,7 +232,7 @@ class BackendTests(unittest.TestCase):
         async def fake_project(*_args):
             return doc.copy()
 
-        async def unavailable_ai(*_args):
+        async def unavailable_ai(*_args, **_kwargs):
             raise RuntimeError("Gemini is temporarily unavailable")
 
         async def save_doc(value, _user_id):

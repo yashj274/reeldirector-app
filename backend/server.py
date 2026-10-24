@@ -1478,9 +1478,19 @@ Make it practical to film on a phone and tailored to {doc['platform']}. Match th
     ai_generated = True
     script = ""
     try:
-        raw = await chat_once(STORYBOARD_SYSTEM, prompt)
+        raw = await chat_once(STORYBOARD_SYSTEM, prompt, max_output_tokens=4096)
         response_data = extract_json(raw)
         if isinstance(response_data, dict):
+            proposed_shots = response_data.get("shots")
+            if isinstance(proposed_shots, list) and len(proposed_shots) < 4:
+                repair_prompt = (
+                    f"{prompt}\n\nThe last draft had only {len(proposed_shots)} shots, so it was incomplete. "
+                    "Return a complete JSON storyboard with at least four distinct shots; shorten descriptions if needed."
+                )
+                raw = await chat_once(STORYBOARD_SYSTEM, repair_prompt, max_output_tokens=4096, max_attempts=1)
+                response_data = extract_json(raw)
+            if not isinstance(response_data, dict):
+                raise ValueError("storyboard response was not a complete JSON object")
             shots = normalise_storyboard(response_data.get("shots"))
             script = str(response_data.get("concept") or response_data.get("script") or "").strip()
             if not script:
