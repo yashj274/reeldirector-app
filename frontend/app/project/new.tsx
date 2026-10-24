@@ -77,7 +77,6 @@ export default function NewProject() {
     void getCreatorStyleProfile().then((profile) => {
       setCreatorProfile(profile);
       if (!params.template && (profile.project_count > 0 || profile.has_preferences)) {
-        setUseMyStyle(true);
         setMood(profile.mood);
         setDuration(profile.duration_seconds);
         setStyle(profile.style);
