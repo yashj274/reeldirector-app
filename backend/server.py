@@ -136,7 +136,7 @@ class CaptionEditIn(BaseModel):
 class ExportIn(BaseModel):
     project_id: Optional[str] = None  # taken from URL path; body-optional
     aspect_ratio: str = "9:16"  # 9:16, 1:1, 16:9
-    resolution: str = "1080p"
+    resolution: str = "720p"
     fps: int = 30
     editing_style: Optional[str] = None  # cinematic, luxury, minimal, action, editorial, warm, fast_pace
     render_provider: str = "ffmpeg"  # ffmpeg or creatomate
@@ -478,7 +478,7 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
             "enable='between(t,0,3.5)'"
         )
     video_filter = ",".join(filters)
-    command = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file)]
+    command = [ffmpeg, "-y", "-filter_threads", "1", "-filter_complex_threads", "1", "-f", "concat", "-safe", "0", "-i", str(concat_file)]
     external_audio_labels = []
     audio_filters = []
     source_audio_filter = f"{'atempo=1.25,' if editing_style == 'fast_pace' else ''}volume={max(0.0, min(1.0, original_volume))}"
@@ -523,7 +523,7 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
         if editing_style == "fast_pace" or original_volume != 1.0:
             command.extend(["-filter:a", source_audio_filter])
     command.extend([
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "ultrafast", "-threads:v", "1", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", str(output_file),
     ])
     subprocess.run(
@@ -546,7 +546,7 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
         [ffmpeg, "-i", str(input_file)], check=False, capture_output=True, text=True, timeout=45,
     )
     has_audio = "Audio:" in probe.stderr
-    command = [ffmpeg, "-y"]
+    command = [ffmpeg, "-y", "-filter_threads", "1", "-filter_complex_threads", "1"]
     if trim_start_seconds > 0:
         command.extend(["-ss", f"{trim_start_seconds:.3f}"])
     command.extend(["-i", str(input_file)])
@@ -595,7 +595,7 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
         video_filter = video_filter.replace(",format=yuv420p", f",{caption_filter},format=yuv420p")
     command.extend([
         "-map", "0:v:0", "-map", audio_map, "-vf", video_filter,
-        "-af", f"atempo={rate:.3f},apad", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-af", f"atempo={rate:.3f},apad", "-c:v", "libx264", "-preset", "ultrafast", "-threads:v", "1", "-crf", "23",
         "-pix_fmt", "yuv420p", "-r", str(fps), "-c:a", "aac", "-ar", "48000",
         "-ac", "2", "-b:a", "128k", "-shortest", "-movflags", "+faststart",
         str(output_file),

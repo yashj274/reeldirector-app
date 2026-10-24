@@ -80,7 +80,7 @@ const CLIP_FILTERS = [
 ];
 
 const DEFAULT_SETTINGS: EditorSettings = {
-  aspect_ratio: '9:16', fit_mode: 'fill', resolution: '1080p', fps: 30, editing_style: 'cinematic', pacing: 'balanced',
+  aspect_ratio: '9:16', fit_mode: 'fill', resolution: '720p', fps: 30, editing_style: 'cinematic', pacing: 'balanced',
   clip_order: [], clip_edits: [], clip_splits: {}, title_text: '', title_font: 'sans',
   title_position: 'bottom', title_color: 'white', title_size: 'medium',
   music_volume: 25, voiceover_volume: 100, original_volume: 80, captions_enabled: false, caption_edits: [],
