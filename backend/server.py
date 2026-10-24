@@ -68,6 +68,11 @@ class QuestionnaireIn(BaseModel):
     audience: str = ""
     language: str = "en"
 
+class ProjectRecommendationIn(BaseModel):
+    title: str = ""
+    purpose: str
+    language: str = "en"
+
 class ProjectOut(BaseModel):
     id: str
     user_id: str
@@ -938,6 +943,45 @@ async def create_project(body: QuestionnaireIn, user=Depends(current_user)):
 @api.get("/projects")
 async def list_projects(user=Depends(current_user)):
     return await list_user_projects(user["id"])
+
+
+@api.post("/projects/recommendations")
+async def recommend_project_settings(body: ProjectRecommendationIn, user=Depends(current_user)):
+    purpose = body.purpose.strip()[:500]
+    if len(purpose) < 10:
+        raise HTTPException(422, "Add at least 10 characters about the video.")
+    if not GEMINI_API_KEY:
+        raise HTTPException(503, "AI recommendations are not configured.")
+    categories = ["wedding", "travel", "food", "fashion", "gym", "product", "real_estate", "cafe", "restaurant", "event", "documentary", "business", "lifestyle", "daily_vlog", "social_media", "cinematic"]
+    styles = ["cinematic", "fast_pace", "minimal", "editorial", "luxury", "action"]
+    moods = ["Cinematic", "Emotional", "Energetic", "Luxury", "Minimal", "Warm"]
+    prompt = (
+        "Choose the best short-form video category, visual style, and mood from the allowed values. "
+        "Interpret the creator's full description, including cultural context. Do not infer unsupported specifics. "
+        f"Title: {body.title[:120]}\nDescription: {purpose}\nLanguage: {body.language[:16]}\n"
+        f"Allowed categories: {', '.join(categories)}\nAllowed styles: {', '.join(styles)}\nAllowed moods: {', '.join(moods)}\n"
+        "Return only JSON with string keys shoot_type, style, mood."
+    )
+    try:
+        raw = await asyncio.wait_for(chat_once(
+            "You are a short-form video creative director. Return concise valid JSON only.", prompt,
+            model=GEMINI_SCAN_MODEL, max_output_tokens=128, max_attempts=1,
+            timeout=(3, 7), thinking_level="minimal",
+        ), timeout=8)
+        recommendation = extract_json(raw)
+        if not isinstance(recommendation, dict):
+            raise ValueError("AI recommendation was not valid JSON")
+        result = {
+            "shoot_type": recommendation.get("shoot_type"),
+            "style": recommendation.get("style"),
+            "mood": recommendation.get("mood"),
+        }
+        if result["shoot_type"] not in categories or result["style"] not in styles or result["mood"] not in moods:
+            raise ValueError("AI recommendation contained an unsupported choice")
+        return result
+    except Exception as exc:
+        log.info("Project setup recommendation unavailable: %s", type(exc).__name__)
+        raise HTTPException(503, "AI recommendations are temporarily unavailable.") from exc
 
 
 @api.get("/projects/{pid}")

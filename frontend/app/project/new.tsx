@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView,
   StyleSheet, Text, TextInput, View,
@@ -65,6 +65,8 @@ export default function NewProject() {
   const [useMyStyle, setUseMyStyle] = useState(false);
   const [moreOptions, setMoreOptions] = useState(false);
   const [choicesTouched, setChoicesTouched] = useState(false);
+  const [recommendationState, setRecommendationState] = useState<'idle' | 'waiting' | 'loading' | 'ready' | 'fallback'>('idle');
+  const recommendationSequence = useRef(0);
 
   const [customOpen, setCustomOpen] = useState(false);
   const [customName, setCustomName] = useState('');
@@ -95,6 +97,39 @@ export default function NewProject() {
       setStyle(defaults.style);
     }
   }, [title, purpose, params.template, choicesTouched, useMyStyle, creatorProfile]);
+
+  useEffect(() => {
+    const sequence = ++recommendationSequence.current;
+    if (params.template || choicesTouched || useMyStyle || purpose.trim().length < 10) {
+      setRecommendationState('idle');
+      return;
+    }
+    setRecommendationState('waiting');
+    const timer = setTimeout(() => {
+      setRecommendationState('loading');
+      void getLanguage()
+        .then((language) => api.recommendProjectSettings(title.trim(), purpose.trim(), language))
+        .then((result) => {
+          if (sequence !== recommendationSequence.current || choicesTouched || useMyStyle) return;
+          if (!DEFAULT_TYPES.includes(result.shoot_type) || !STYLES.includes(result.style) || !MOODS.includes(result.mood)) {
+            throw new Error('Unsupported AI recommendation');
+          }
+          setShootType(result.shoot_type);
+          setStyle(result.style);
+          setMood(result.mood);
+          setRecommendationState('ready');
+        })
+        .catch(() => {
+          if (sequence !== recommendationSequence.current || choicesTouched || useMyStyle) return;
+          const suggestion = inferDefaults(`${title} ${purpose}`);
+          setShootType(suggestion.category);
+          setStyle(suggestion.style);
+          setMood(suggestion.mood);
+          setRecommendationState('fallback');
+        });
+    }, 650);
+    return () => clearTimeout(timer);
+  }, [title, purpose, params.template, choicesTouched, useMyStyle]);
 
   const addCustom = () => {
     const raw = customName.trim();
@@ -177,6 +212,38 @@ export default function NewProject() {
             </View>
             <Text style={styles.helper}>{t('purpose_hint')}</Text>
 
+            <View style={styles.recommendationStatus}>
+              {(recommendationState === 'waiting' || recommendationState === 'loading') && <ActivityIndicator size="small" color={theme.color.brand} />}
+              {recommendationState !== 'idle' && <Text style={styles.recommendationText}>
+                {recommendationState === 'ready' ? t('ai_setup_ready') : recommendationState === 'fallback' ? t('ai_setup_fallback') : t('ai_setup_thinking')}
+              </Text>}
+            </View>
+
+            <Text style={styles.label}>{t('type_of_shoot')}</Text>
+            <View style={styles.chipRow}>
+              {types.map((id) => chip(shootType === id, label(id, t), () => { setChoicesTouched(true); setShootType(id); }, `chip-shoot-${id}`))}
+              <Pressable onPress={() => setCustomOpen(true)} style={[styles.chip, styles.chipAdd]} testID="chip-shoot-add-custom">
+                <Ionicons name="add" size={16} color={theme.color.brand} />
+                <Text style={[styles.chipText, { color: theme.color.brand, marginLeft: 4 }]}>{t('custom')}</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.label}>{t('style_label')}</Text>
+            <View style={styles.chipRow}>
+              {STYLES.map((value) => chip(style === value, t(`style_${value}`), () => { setChoicesTouched(true); setStyle(value); }, `chip-style-${value}`))}
+            </View>
+            <Text style={styles.label}>{t('mood')}</Text>
+            <View style={styles.chipRow}>
+              {MOODS.map((m) => chip(mood === m, t(`mood_${m.toLowerCase()}`), () => { setChoicesTouched(true); setMood(m); }, `chip-mood-${m}`))}
+            </View>
+            <Text style={styles.label}>{t('duration')}</Text>
+            <View style={styles.chipRow}>
+              {DURATIONS.map((d) => chip(duration === d, `${d}s`, () => { setChoicesTouched(true); setDuration(d); }, `chip-dur-${d}`))}
+            </View>
+            <Text style={styles.label}>{t('platform')}</Text>
+            <View style={styles.chipRow}>
+              {PLATFORMS.map((p) => chip(platform === p.id, p.label, () => { setChoicesTouched(true); setPlatform(p.id); }, `chip-plat-${p.id}`))}
+            </View>
+
             <Pressable style={[styles.myStyle, useMyStyle && styles.myStyleOn]} onPress={toggleMyStyle}
               accessibilityRole="checkbox" accessibilityState={{ checked: useMyStyle }} testID="new-project-use-my-style">
               <Ionicons name={useMyStyle ? 'checkbox' : 'square-outline'} size={22} color={useMyStyle ? theme.color.brand : theme.color.onSurface3} />
@@ -191,30 +258,6 @@ export default function NewProject() {
               <Ionicons name={moreOptions ? 'chevron-up' : 'chevron-down'} size={18} color={theme.color.onSurface2} />
             </Pressable>
             {moreOptions && <View style={styles.advanced}>
-              <Text style={styles.label}>{t('type_of_shoot')}</Text>
-              <View style={styles.chipRow}>
-                {types.map((id) => chip(shootType === id, label(id, t), () => { setChoicesTouched(true); setShootType(id); }, `chip-shoot-${id}`))}
-                <Pressable onPress={() => setCustomOpen(true)} style={[styles.chip, styles.chipAdd]} testID="chip-shoot-add-custom">
-                  <Ionicons name="add" size={16} color={theme.color.brand} />
-                  <Text style={[styles.chipText, { color: theme.color.brand, marginLeft: 4 }]}>{t('custom')}</Text>
-                </Pressable>
-              </View>
-              <Text style={styles.label}>{t('style_label')}</Text>
-              <View style={styles.chipRow}>
-                {STYLES.map((value) => chip(style === value, t(`style_${value}`), () => { setChoicesTouched(true); setStyle(value); }, `chip-style-${value}`))}
-              </View>
-              <Text style={styles.label}>{t('mood')}</Text>
-              <View style={styles.chipRow}>
-                {MOODS.map((m) => chip(mood === m, t(`mood_${m.toLowerCase()}`), () => { setChoicesTouched(true); setMood(m); }, `chip-mood-${m}`))}
-              </View>
-              <Text style={styles.label}>{t('duration')}</Text>
-              <View style={styles.chipRow}>
-                {DURATIONS.map((d) => chip(duration === d, `${d}s`, () => { setChoicesTouched(true); setDuration(d); }, `chip-dur-${d}`))}
-              </View>
-              <Text style={styles.label}>{t('platform')}</Text>
-              <View style={styles.chipRow}>
-                {PLATFORMS.map((p) => chip(platform === p.id, p.label, () => { setChoicesTouched(true); setPlatform(p.id); }, `chip-plat-${p.id}`))}
-              </View>
               <Text style={styles.label}>{t('target_audience')}</Text>
               <View style={styles.input}>
                 <TextInput value={audience} onChangeText={setAudience} placeholder={t('audience_example')}
@@ -293,6 +336,8 @@ const styles = StyleSheet.create({
   purposeInput: { height: 136, justifyContent: 'flex-start' },
   purposeText: { minHeight: 112, paddingVertical: 12 },
   helper: { color: theme.color.onSurface3, fontSize: 12, lineHeight: 17, marginTop: 7 },
+  recommendationStatus: { minHeight: 20, flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 8 },
+  recommendationText: { color: theme.color.onSurface3, fontSize: 12 },
   text: { color: theme.color.onSurface, fontSize: 16 },
   myStyle: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, marginTop: 18, borderRadius: theme.radius.md, backgroundColor: theme.color.surface2, borderWidth: 1, borderColor: theme.color.border },
   myStyleOn: { borderColor: theme.color.brand, backgroundColor: theme.color.brandTint },

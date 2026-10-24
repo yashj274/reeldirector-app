@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import imageio_ffmpeg
@@ -59,6 +59,34 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(health.json()["database"], "supabase")
         self.assertFalse(health.json()["supabase_configured"])
         self.assertEqual(unauthenticated.status_code, 401)
+
+    def test_project_recommendations_accept_only_supported_ai_choices(self):
+        async def run():
+            valid = '{"shoot_type":"wedding","style":"cinematic","mood":"Emotional"}'
+            with patch.object(server, "GEMINI_API_KEY", "test-key"), patch.object(server, "chat_once", new=AsyncMock(return_value=valid)):
+                result = await server.recommend_project_settings(
+                    server.ProjectRecommendationIn(title="Mehndi", purpose="A family mehndi celebration"),
+                    user={"id": "test-user"},
+                )
+                self.assertEqual(result, {"shoot_type": "wedding", "style": "cinematic", "mood": "Emotional"})
+
+            invalid = '{"shoot_type":"invented","style":"cinematic","mood":"Emotional"}'
+            with patch.object(server, "GEMINI_API_KEY", "test-key"), patch.object(server, "chat_once", new=AsyncMock(return_value=invalid)):
+                with self.assertRaises(server.HTTPException) as failure:
+                    await server.recommend_project_settings(
+                        server.ProjectRecommendationIn(title="Test", purpose="A sufficiently long description"),
+                        user={"id": "test-user"},
+                    )
+                self.assertEqual(failure.exception.status_code, 503)
+
+            with self.assertRaises(server.HTTPException) as short_description:
+                await server.recommend_project_settings(
+                    server.ProjectRecommendationIn(title="Test", purpose="Too short"),
+                    user={"id": "test-user"},
+                )
+            self.assertEqual(short_description.exception.status_code, 422)
+
+        asyncio.run(run())
 
     def test_admin_access_uses_normalized_server_allowlist(self):
         with patch.object(server, "ADMIN_EMAILS", {"admin@example.com"}):

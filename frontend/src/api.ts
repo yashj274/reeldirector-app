@@ -757,6 +757,9 @@ export const api = {
   },
   me: async () => profile(await currentUser()),
   templates: async () => TEMPLATES,
+  recommendProjectSettings: (title: string, purpose: string, language: string) => request('/projects/recommendations', {
+    method: 'POST', body: JSON.stringify({ title, purpose, language }),
+  }),
   createProject: (payload: any) => {
     const key = JSON.stringify(payload);
     const active = pendingProjectCreates.get(key);
