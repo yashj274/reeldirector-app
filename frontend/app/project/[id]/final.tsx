@@ -87,10 +87,12 @@ export default function FinalPlayer() {
     setDownloading(true);
     try {
       if (Platform.OS === 'web') {
+        const filename = `${(project?.title || 'reel').replace(/[^a-z0-9_-]/gi, '-')}.mp4`;
+        const downloadUrl = new URL(url);
+        downloadUrl.searchParams.set('download', filename);
         const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = `${(project?.title || 'reel').replace(/[^a-z0-9_-]/gi, '-')}.mp4`;
-        anchor.target = '_blank';
+        anchor.href = downloadUrl.toString();
+        anchor.download = filename;
         anchor.rel = 'noreferrer';
         document.body.appendChild(anchor);
         anchor.click();
