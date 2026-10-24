@@ -36,7 +36,7 @@ export default function Dashboard() {
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void api.warmBackend(); void load(); }, [load]);
 
   const onNewProject = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});

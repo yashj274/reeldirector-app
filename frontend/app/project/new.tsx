@@ -74,6 +74,7 @@ export default function NewProject() {
   const canSubmit = useMemo(() => title.trim().length >= 2 && purpose.trim().length >= 10, [title, purpose]);
 
   useEffect(() => {
+    void api.warmBackend();
     void getCreatorStyleProfile().then((profile) => {
       setCreatorProfile(profile);
       if (!params.template && (profile.project_count > 0 || profile.has_preferences)) {

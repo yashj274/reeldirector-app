@@ -40,7 +40,10 @@ export default function Scan() {
   const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const captureTaskRef = useRef<Promise<void> | null>(null);
 
-  useEffect(() => { if (id) api.getProject(id).then(setProject).catch(() => {}); }, [id]);
+  useEffect(() => {
+    void api.warmBackend();
+    if (id) api.getProject(id).then(setProject).catch(() => {});
+  }, [id]);
   useEffect(() => () => {
     scanActiveRef.current = false;
     if (scanTimerRef.current) clearTimeout(scanTimerRef.current);

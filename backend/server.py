@@ -423,6 +423,23 @@ def _ffmpeg_executable() -> str:
     return shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 
 
+VIDEO_STYLE_FILTERS = {
+    "cinematic": "eq=contrast=1.08:saturation=0.95:brightness=-0.02",
+    "luxury": "eq=contrast=1.04:saturation=0.90,colorbalance=rs=0.04:gs=0.01:bs=-0.02",
+    "minimal": "eq=contrast=1.01:saturation=0.85",
+    "action": "eq=contrast=1.15:saturation=1.08",
+    "editorial": "eq=contrast=1.10:saturation=1.05",
+    "warm": "colorbalance=rs=0.08:gs=0.02:bs=-0.06",
+    "fast_pace": "eq=contrast=1.12:saturation=1.08",
+    "original": "",
+    "mono": "hue=s=0,eq=contrast=1.04",
+    "vivid": "eq=contrast=1.12:saturation=1.22",
+    "cool": "colorbalance=rs=-0.04:gs=0.01:bs=0.08",
+    "vintage": "eq=contrast=0.92:saturation=0.78:brightness=0.025",
+    "soft": "eq=contrast=0.92:saturation=0.92",
+}
+
+
 def _run_video_render(concat_file: Path, output_file: Path, width: int, height: int,
                       soundtrack_file: Optional[Path], fps: int, editing_style: str,
                       title_text: str = "", title_font: str = "sans",
@@ -431,21 +448,6 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
                       original_volume: float = 0.8, voiceover_file: Optional[Path] = None,
                       voiceover_volume: float = 1.0) -> None:
     ffmpeg = _ffmpeg_executable()
-    grades = {
-        "cinematic": "eq=contrast=1.08:saturation=0.95:brightness=-0.02",
-        "luxury": "eq=contrast=1.04:saturation=0.90,colorbalance=rs=0.04:gs=0.01:bs=-0.02",
-        "minimal": "eq=contrast=1.01:saturation=0.85",
-        "action": "eq=contrast=1.15:saturation=1.08",
-        "editorial": "eq=contrast=1.10:saturation=1.05",
-        "warm": "colorbalance=rs=0.08:gs=0.02:bs=-0.06",
-        "fast_pace": "eq=contrast=1.12:saturation=1.08",
-        "original": "",
-        "mono": "hue=s=0,eq=contrast=1.04",
-        "vivid": "eq=contrast=1.12:saturation=1.22",
-        "cool": "colorbalance=rs=-0.04:gs=0.01:bs=0.08",
-        "vintage": "eq=contrast=0.92:saturation=0.78:brightness=0.025",
-        "soft": "eq=contrast=0.92:saturation=0.92",
-    }
     filters = [
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
@@ -453,8 +455,8 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
     if editing_style == "fast_pace":
         filters.append("setpts=0.8*PTS")
     filters.append(f"fps={fps}")
-    if grades.get(editing_style):
-        filters.append(grades[editing_style])
+    if VIDEO_STYLE_FILTERS.get(editing_style):
+        filters.append(VIDEO_STYLE_FILTERS[editing_style])
     filters.append("format=yuv420p")
     if title_text.strip():
         title_file = concat_file.parent / "title-overlay.txt"
@@ -532,6 +534,15 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
     )
 
 
+def _run_video_remux(concat_file: Path, output_file: Path) -> None:
+    subprocess.run(
+        [_ffmpeg_executable(), "-y", "-filter_threads", "1", "-f", "concat", "-safe", "0",
+         "-i", str(concat_file), "-c", "copy", "-movflags", "+faststart", str(output_file)],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        timeout=120, cwd=concat_file.parent,
+    )
+
+
 def _normalize_video_clip(input_file: Path, output_file: Path, width: int, height: int, fps: int,
                           trim_start_seconds: float = 0, trim_end_seconds: Optional[float] = None,
                           filter_preset: str = "original", fit_mode: str = "fill",
@@ -539,7 +550,8 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
                           caption_start_seconds: float = 0.0, caption_end_seconds: Optional[float] = None,
                           caption_position_x: float = 50.0, caption_position_y: float = 84.0,
                           caption_size: str = "medium", caption_font: str = "sans",
-                          playback_rate: float = 1.0) -> None:
+                          playback_rate: float = 1.0, editing_style: Optional[str] = None,
+                          audio_volume: float = 1.0) -> None:
     """Transcode mixed phone/AI sources into matching MP4 video and AAC audio streams."""
     ffmpeg = _ffmpeg_executable()
     probe = subprocess.run(
@@ -593,9 +605,12 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
             f"enable='between(t,{max(0.0, caption_start_seconds):.3f},{caption_duration:.3f})'"
         )
         video_filter = video_filter.replace(",format=yuv420p", f",{caption_filter},format=yuv420p")
+    style_filter = VIDEO_STYLE_FILTERS.get(editing_style or "")
+    if style_filter:
+        video_filter = video_filter.replace(",format=yuv420p", f",{style_filter},format=yuv420p")
     command.extend([
         "-map", "0:v:0", "-map", audio_map, "-vf", video_filter,
-        "-af", f"atempo={rate:.3f},apad", "-c:v", "libx264", "-preset", "ultrafast", "-threads:v", "1", "-crf", "23",
+        "-af", f"atempo={rate:.3f},apad,volume={max(0.0, min(1.0, audio_volume)):.3f}", "-c:v", "libx264", "-preset", "ultrafast", "-threads:v", "1", "-crf", "23",
         "-pix_fmt", "yuv420p", "-r", str(fps), "-c:a", "aac", "-ar", "48000",
         "-ac", "2", "-b:a", "128k", "-shortest", "-movflags", "+faststart",
         str(output_file),
@@ -2381,6 +2396,10 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
     voiceover_path = voiceover.get("storage_path")
     if voiceover_path and not voiceover_path.startswith(expected_prefix):
         raise HTTPException(400, "The voiceover is not stored in this project.")
+    remux_after_normalizing = (
+        not title_text and not soundtrack_path and not voiceover_path
+        and requested_style != "fast_pace"
+    )
 
     if body.render_provider == "creatomate":
         if any(normalized_splits.values()) or any(edit["playback_rate"] != 1 for edit in normalized_edits.values()):
@@ -2441,6 +2460,8 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
                     caption_edit.get("position_x", 50), caption_edit.get("position_y", 84),
                     caption_edit.get("size", "medium"), caption_edit.get("font", "sans"),
                     clip_edit.get("playback_rate", 1),
+                    requested_style if remux_after_normalizing else None,
+                    body.original_volume if remux_after_normalizing else 1.0,
                 )
                 if not local_clip.stat().st_size:
                     raise RuntimeError("A saved video clip could not be normalized")
@@ -2462,12 +2483,24 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
                 if not local_voiceover.stat().st_size:
                     raise RuntimeError("The saved voiceover is empty")
 
-            await asyncio.to_thread(
-                _run_video_render, concat_file, output_file, width, height,
-                local_soundtrack, body.fps, requested_style, title_text, body.title_font,
-                body.title_position, body.title_color, body.title_size,
-                body.music_volume, body.original_volume, local_voiceover, body.voiceover_volume,
-            )
+            if remux_after_normalizing:
+                try:
+                    await asyncio.to_thread(_run_video_remux, concat_file, output_file)
+                except subprocess.CalledProcessError:
+                    log.warning("fast export remux failed for project %s; using full encode", pid)
+                    await asyncio.to_thread(
+                        _run_video_render, concat_file, output_file, width, height,
+                        None, body.fps, "original", "", body.title_font,
+                        body.title_position, body.title_color, body.title_size,
+                        0.0, 1.0, None, body.voiceover_volume,
+                    )
+            else:
+                await asyncio.to_thread(
+                    _run_video_render, concat_file, output_file, width, height,
+                    local_soundtrack, body.fps, requested_style, title_text, body.title_font,
+                    body.title_position, body.title_color, body.title_size,
+                    body.music_volume, body.original_volume, local_voiceover, body.voiceover_volume,
+                )
             rendered = output_file.read_bytes()
     except HTTPException:
         raise
