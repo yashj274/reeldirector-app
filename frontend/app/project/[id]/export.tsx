@@ -45,6 +45,7 @@ type EditorSettings = {
   resolution: string;
   fps: number;
   editing_style: string;
+  pacing: 'relaxed' | 'balanced' | 'fast';
   clip_order: number[];
   clip_edits: ClipEdit[];
   clip_splits: Record<number, number[]>;
@@ -79,7 +80,7 @@ const CLIP_FILTERS = [
 ];
 
 const DEFAULT_SETTINGS: EditorSettings = {
-  aspect_ratio: '9:16', fit_mode: 'fill', resolution: '1080p', fps: 30, editing_style: 'cinematic',
+  aspect_ratio: '9:16', fit_mode: 'fill', resolution: '1080p', fps: 30, editing_style: 'cinematic', pacing: 'balanced',
   clip_order: [], clip_edits: [], clip_splits: {}, title_text: '', title_font: 'sans',
   title_position: 'bottom', title_color: 'white', title_size: 'medium',
   music_volume: 25, voiceover_volume: 100, original_volume: 80, captions_enabled: false, caption_edits: [],
@@ -174,6 +175,7 @@ function makeSettings(project: any): EditorSettings {
   return {
     ...DEFAULT_SETTINGS,
     ...saved,
+    pacing: ['relaxed', 'balanced', 'fast'].includes(saved.pacing) ? saved.pacing : 'balanced',
     title_font: CAPTION_FONTS.some(([font]) => font === saved.title_font) ? saved.title_font : 'sans',
     music_volume: Number.isFinite(musicVolume) ? (musicVolume <= 1 ? musicVolume * 100 : musicVolume) : DEFAULT_SETTINGS.music_volume,
     voiceover_volume: Number.isFinite(voiceoverVolume) ? (voiceoverVolume <= 1 ? voiceoverVolume * 100 : voiceoverVolume) : DEFAULT_SETTINGS.voiceover_volume,
@@ -936,7 +938,7 @@ export default function Export() {
     setAutoEditing(true);
     setToolError('');
     try {
-      const suggestion = await api.autoEdit(id, settings.editing_style);
+      const suggestion = await api.autoEdit(id, settings.editing_style, settings.pacing);
       setSettings((current) => {
         pushHistory(current);
         const suggestions = new Map((suggestion.clip_edits || []).map((edit: ClipEdit) => [edit.shot_index, edit]));
@@ -1544,6 +1546,8 @@ export default function Export() {
         {tool === 'Filter' ? (
           <>
             <Text style={styles.sheetDescription}>Let AI shape a first cut from your shot plan and saved shot reviews, then preview it and adjust anything.</Text>
+            <Text style={styles.rowLabel}>AI PACING · {settings.pacing.toUpperCase()}</Text>
+            <ChoiceRow options={[[ 'relaxed', 'Relaxed' ], [ 'balanced', 'Balanced' ], [ 'fast', 'Fast' ]]} selected={settings.pacing} onSelect={(value) => update('pacing', value as EditorSettings['pacing'])} />
             <ActionButton icon="sparkles-outline" label="Make my reel" onPress={() => void makeMyReel()} loading={autoEditing} />
             {!!toolError && <Text style={styles.inlineError} accessibilityRole="alert">{toolError}</Text>}
             <Text style={styles.sheetDescription}>Choose a look for the whole reel or a filter for just this clip.</Text>

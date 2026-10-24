@@ -791,8 +791,8 @@ export const api = {
     void rememberCreatorStyleChoice(updated);
     return { ok: true };
   },
-  autoEdit: async (id: string, style: string) => request(`/projects/${id}/auto-edit`, {
-    method: 'POST', body: JSON.stringify({ style }),
+  autoEdit: async (id: string, style: string, pacing = 'balanced') => request(`/projects/${id}/auto-edit`, {
+    method: 'POST', body: JSON.stringify({ style, pacing }),
   }),
   analyzeMusicBeats: async (id: string) => request(`/projects/${id}/beat-sync`, { method: 'POST' }),
   deleteProject: async (id: string) => {
