@@ -220,6 +220,7 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(result["ai_generated"])
         self.assertEqual(len(result["storyboard"]), 4)
         self.assertEqual(ai.await_count, 2)
+        self.assertIn("NO SCAN", ai.await_args_list[0].args[1])
         self.assertIn("last draft had only 3 shots", ai.await_args.args[1])
 
     def test_storyboard_endpoint_persists_fallback_when_ai_is_unavailable(self):

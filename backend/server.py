@@ -1452,16 +1452,25 @@ async def generate_storyboard(pid: str, body: Optional[StoryboardRequest] = None
     if selected_code in LANGUAGE_NAMES:
         doc["language"] = selected_code
     scene_map = doc.get("scene_map") or {}
+    has_reliable_scan = bool(scene_map and scene_map.get("ai_generated", True))
     scene_context = (
         json.dumps(scene_map, ensure_ascii=False)
-        if scene_map and scene_map.get("ai_generated", True)
+        if has_reliable_scan
         else "No reliable AI environment scan was available. Use the creator's description and title only."
+    )
+    no_scan_rule = (
+        "NO SCAN: The title and creator description are the only evidence about visible subjects. "
+        "Use only their explicitly named people, places, and objects. Do not invent signs, doors, furniture, "
+        "windows, colors, architecture, lighting, props, or actions. Cinematic storytelling must come from "
+        "framing and sequence, not imagined set details."
+        if not has_reliable_scan else ""
     )
     style_context = creator_style_prompt(user.get("creator_style_profile", {})) if doc.get("use_creator_style") else ""
     prompt = f"""Create a highly customized script and shot list in {language} for this video:
 Title: {doc['title']}
 Type: {doc['shoot_type']}
 Creator's explanation of the video and desired story: {doc['purpose'] or 'No additional explanation was supplied; infer only from the title and type.'}
+{no_scan_rule}
 Mood: {doc['mood'] or 'cinematic'}
 Style: {doc['style']}
 Platform: {doc['platform']}
