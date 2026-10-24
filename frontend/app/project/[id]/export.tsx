@@ -15,6 +15,7 @@ import * as Haptics from 'expo-haptics';
 
 import { api } from '@/src/api';
 import { isClipProgress, shouldAdvanceOnEndEvent } from '@/src/reelPlayback';
+import { syncClipEndsToBeats } from '@/src/beatSync';
 import { locateTimelinePosition, splitTimelineRange } from '@/src/timeline';
 import { theme } from '@/src/theme';
 
@@ -213,6 +214,7 @@ export default function Export() {
   const [saving, setSaving] = useState(false);
   const [rendering, setRendering] = useState(false);
   const [autoEditing, setAutoEditing] = useState(false);
+  const [beatSyncing, setBeatSyncing] = useState(false);
   const [renderStage, setRenderStage] = useState('');
   const [renderError, setRenderError] = useState('');
   const [notice, setNotice] = useState('');
@@ -969,6 +971,52 @@ export default function Export() {
     }
   };
 
+  const syncToMusicBeats = async () => {
+    if (!id || !project?.soundtrack?.storage_path || beatSyncing || saving || rendering) return;
+    setBeatSyncing(true);
+    setToolError('');
+    try {
+      const analysis = await api.analyzeMusicBeats(id);
+      const suggestions = syncClipEndsToBeats(orderedClips.map((clip: any, index: number) => {
+        const shot = shotIndex(clip, index);
+        const edit = editForShot(settings, shot);
+        return {
+          shotIndex: shot,
+          sourceDuration: sourceDurations[shot] || Number(clip?.duration_seconds) || 5,
+          edit,
+        };
+      }), analysis.beat_times || []);
+      if (!suggestions.size) throw new Error('Could not find safe beat-aligned cut points in this track.');
+
+      setSettings((current) => {
+        pushHistory(current);
+        const clip_edits = current.clip_edits.map((edit) => ({
+          ...edit,
+          ...(suggestions.has(edit.shot_index) ? { trim_end_seconds: suggestions.get(edit.shot_index)! } : {}),
+        }));
+        const clip_splits = Object.fromEntries(Object.entries(current.clip_splits).map(([shot, points]) => {
+          const edit = clip_edits.find((item) => item.shot_index === Number(shot));
+          return [shot, edit ? points.filter((point) => point > edit.trim_start_seconds && point < edit.trim_end_seconds) : []];
+        }).filter(([, points]) => points.length));
+        const caption_edits = current.caption_edits.map((caption) => {
+          const edit = clip_edits.find((item) => item.shot_index === caption.shot_index);
+          if (!edit) return caption;
+          const available = Math.max(0.25, (edit.trim_end_seconds - edit.trim_start_seconds) / edit.playback_rate);
+          const start = Math.max(0, Math.min(available - 0.15, caption.start_seconds));
+          return { ...caption, start_seconds: start, end_seconds: Math.max(start + 0.15, Math.min(available, caption.end_seconds)) };
+        });
+        return { ...current, clip_edits, clip_splits, caption_edits };
+      });
+      setDirty(true);
+      setNotice(`Suggested cuts aligned to about ${analysis.bpm} BPM. Preview, adjust, or undo before saving.`);
+      setTool(null);
+    } catch (error: any) {
+      setToolError(error.message || 'Could not analyze the music. Your edits are safe.');
+    } finally {
+      setBeatSyncing(false);
+    }
+  };
+
   const addClip = async () => {
     if (!id || addingClip) return;
     setAddingClip(true);
@@ -1396,6 +1444,12 @@ export default function Export() {
               {project?.soundtrack?.storage_path ? <Pressable onPress={removeAudio} style={styles.smallIconButton} accessibilityLabel="Remove audio"><Ionicons name="trash-outline" size={18} color="#F87171" /></Pressable> : null}
             </View>
             <ActionButton icon="folder-open-outline" label={project?.soundtrack?.title ? 'Replace music' : 'Choose music'} onPress={() => void chooseAudio()} loading={audioBusy} />
+            {project?.soundtrack?.storage_path ? (
+              <>
+                <ActionButton icon="musical-note-outline" label="Sync cuts to music beats" onPress={() => void syncToMusicBeats()} loading={beatSyncing} />
+                <Text style={styles.sheetFootnote}>Optional: preview the suggested cut timing, adjust it, or undo. Nothing is applied to your source clips.</Text>
+              </>
+            ) : <Text style={styles.sheetFootnote}>Add a music track to see the optional beat-sync suggestion.</Text>}
             <Text style={styles.rowLabel}>MUSIC VOLUME · {settings.music_volume}%</Text>
             <VolumeControl value={settings.music_volume} onChange={(value) => update('music_volume', value)} />
             <Text style={styles.rowLabel}>CLIP SOUND · {settings.original_volume}%</Text>

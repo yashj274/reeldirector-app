@@ -1,5 +1,6 @@
 """ReelDirector AI Backend - FastAPI + Supabase + Gemini API."""
 import asyncio
+import array
 import os
 import json
 import logging
@@ -2053,6 +2054,85 @@ async def suggest_auto_edit(pid: str, body: AutoEditIn, user=Depends(current_use
     except Exception as error:
         log.warning("AI auto-edit unavailable for project %s: %s", pid, error)
         raise HTTPException(503, "AI could not prepare a first cut just now. Your clips and current edits are safe.")
+
+
+def _music_beat_grid(audio_path: Path) -> Dict[str, Any]:
+    """Estimate a beat grid from a small mono audio envelope using FFmpeg and stdlib."""
+    ffmpeg = _ffmpeg_executable()
+    decoded = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(audio_path), "-t", "180", "-vn", "-ac", "1",
+         "-ar", "11025", "-f", "f32le", "pipe:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25,
+    )
+    if decoded.returncode != 0 or len(decoded.stdout) < 11025 * 4:
+        raise ValueError("Music track could not be analyzed")
+    samples = array.array("f")
+    samples.frombytes(decoded.stdout[:len(decoded.stdout) - len(decoded.stdout) % 4])
+    frame_samples = 551  # approximately 50 ms at 11.025 kHz
+    envelope = []
+    for offset in range(0, len(samples) - frame_samples, frame_samples):
+        block = samples[offset:offset + frame_samples]
+        envelope.append(math.sqrt(sum(value * value for value in block) / frame_samples))
+    if len(envelope) < 100:
+        raise ValueError("Music track is too short to find a steady beat")
+    average = sum(envelope) / len(envelope)
+    flux = [max(0.0, value - average) for value in envelope]
+    energy = sum(value * value for value in flux)
+    if energy <= 1e-9:
+        raise ValueError("This track does not have a clear beat to sync")
+
+    # Search 60–180 BPM and use normalized envelope autocorrelation.
+    best_lag, best_score = 0, 0.0
+    for lag in range(7, 19):
+        numerator = sum(flux[index] * flux[index - lag] for index in range(lag, len(flux)))
+        denominator = math.sqrt(
+            sum(value * value for value in flux[lag:])
+            * sum(value * value for value in flux[:-lag])
+        )
+        score = numerator / denominator if denominator else 0.0
+        if score > best_score:
+            best_lag, best_score = lag, score
+    if not best_lag or best_score < 0.08:
+        raise ValueError("This track does not have a clear steady beat to sync")
+
+    phase = max(
+        range(best_lag),
+        key=lambda offset: sum(flux[index] for index in range(offset, len(flux), best_lag)),
+    )
+    interval = best_lag * 0.05
+    duration = len(envelope) * 0.05
+    beats = [round(phase * 0.05 + index * interval, 3)
+             for index in range(max(0, math.ceil(-phase / best_lag)), int(duration / interval) + 1)]
+    return {
+        "bpm": round(60 / interval),
+        "confidence": round(min(1.0, best_score), 2),
+        "beat_times": [beat for beat in beats if beat > 0],
+    }
+
+
+@api.post("/projects/{pid}/beat-sync")
+async def analyze_project_music_beats(pid: str, user=Depends(current_user)):
+    """Analyze the user's saved soundtrack; never changes the project automatically."""
+    doc = await fetch_project(pid, user["id"])
+    if not doc:
+        raise HTTPException(404, "Project not found")
+    soundtrack_path = ((doc.get("soundtrack") or {}).get("storage_path") or "")
+    expected_prefix = f"{user['id']}/{pid}/"
+    if not soundtrack_path or not soundtrack_path.startswith(expected_prefix):
+        raise HTTPException(400, "Add a music track before syncing cuts to its beats.")
+    try:
+        media = await download_media(soundtrack_path)
+        if not media or len(media) > 30 * 1024 * 1024:
+            raise ValueError("Music track must be smaller than 30 MB")
+        with tempfile.TemporaryDirectory(prefix="reel-beats-") as directory:
+            audio_path = Path(directory) / "music"
+            audio_path.write_bytes(media)
+            return _music_beat_grid(audio_path)
+    except HTTPException:
+        raise
+    except Exception as error:
+        log.info("Music beat analysis unavailable for project %s: %s", pid, error)
+        raise HTTPException(422, str(error) or "Could not analyze this music track.")
 
 
 @api.post("/projects/{pid}/export")

@@ -794,6 +794,7 @@ export const api = {
   autoEdit: async (id: string, style: string) => request(`/projects/${id}/auto-edit`, {
     method: 'POST', body: JSON.stringify({ style }),
   }),
+  analyzeMusicBeats: async (id: string) => request(`/projects/${id}/beat-sync`, { method: 'POST' }),
   deleteProject: async (id: string) => {
     const user = await currentUser();
     const { data, error: readError } = await getSupabase().from('projects').select('data')
