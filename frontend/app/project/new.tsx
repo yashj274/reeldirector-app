@@ -55,6 +55,7 @@ export default function NewProject() {
   const [shootType, setShootType] = useState<string>(params.template || 'social_media');
   const [mood, setMood] = useState<string>(params.mood?.split(' ')[0] || 'Cinematic');
   const [duration, setDuration] = useState<number>(params.duration ? parseInt(params.duration) : 30);
+  const [durationMode, setDurationMode] = useState<'auto' | 'manual'>(params.duration ? 'manual' : 'auto');
   const [style, setStyle] = useState<string>((params.style as string) || 'cinematic');
   const [platform, setPlatform] = useState<string>('instagram_reel');
   const [audience, setAudience] = useState('');
@@ -150,7 +151,7 @@ export default function NewProject() {
     setBusy(true);
     try {
       const p = await api.createProject({
-        title: title.trim(), shoot_type: shootType, purpose, mood, duration_seconds: duration,
+        title: title.trim(), shoot_type: shootType, purpose, mood, duration_seconds: duration, duration_mode: durationMode,
         style, platform, audience, language: await getLanguage(), use_creator_style: useMyStyle,
       });
       router.replace({ pathname: '/project/[id]/scan', params: { id: p.id, flow: 'new' } });
@@ -224,7 +225,10 @@ export default function NewProject() {
             </View>
             <Text style={styles.label}>{t('duration')}</Text>
             <View style={styles.chipRow}>
-              {DURATIONS.map((d) => chip(duration === d, `${d}s`, () => { setChoicesTouched(true); setDuration(d); }, `chip-dur-${d}`))}
+              {chip(durationMode === 'auto', t('ai_picks'), () => setDurationMode('auto'), 'chip-dur-auto')}
+              {DURATIONS.map((d) => chip(durationMode === 'manual' && duration === d, `${d}s`, () => {
+                setChoicesTouched(true); setDuration(d); setDurationMode('manual');
+              }, `chip-dur-${d}`))}
             </View>
             <Text style={styles.label}>{t('platform')}</Text>
             <View style={styles.chipRow}>

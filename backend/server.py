@@ -63,6 +63,7 @@ class QuestionnaireIn(BaseModel):
     purpose: str = ""
     mood: str = ""
     duration_seconds: int = 30
+    duration_mode: str = "auto"
     style: str = "cinematic"
     platform: str = "instagram_reel"
     audience: str = ""
@@ -939,6 +940,7 @@ async def create_project(body: QuestionnaireIn, user=Depends(current_user)):
         "purpose": body.purpose,
         "mood": body.mood,
         "duration_seconds": body.duration_seconds,
+        "duration_mode": "auto" if body.duration_mode == "auto" else "manual",
         "style": body.style,
         "platform": body.platform,
         "audience": body.audience,
@@ -1032,7 +1034,7 @@ UI_TRANSLATION_SOURCE = {
     "signup_subtitle": "Your first reel is 60 seconds away.", "full_name": "Full name", "have_account": "Have an account?",
     "send_reset_link": "Send reset link", "reset_password": "Reset password", "new_password": "New password",
     "update_password": "Update password", "give_reel_name": "Give it a name", "new_reel": "New Reel",
-    "type_of_shoot": "Type of shoot", "mood": "Mood", "duration": "Duration", "platform": "Platform",
+    "type_of_shoot": "Type of shoot", "mood": "Mood", "duration": "Duration", "ai_picks": "AI picks", "platform": "Platform",
     "purpose_label": "What is it for?", "purpose_hint": "Describe what the video should show and why you are making it.",
     "purpose_placeholder": "Describe your project and we'll shape the perfect reel for it…",
     "purpose_required": "Add a little more detail so the AI can plan your story (at least 10 characters).",
@@ -1217,8 +1219,8 @@ async def translate_ui(language_code: str):
     return {"language": code, "translations": UI_TRANSLATION_CACHE[code]}
 
 STORYBOARD_SYSTEM = """You are a culturally informed film director and short-form video scriptwriter.
-Return ONLY one JSON object with `title`, `concept`, `style`, `goal`, `totalDuration`, `hook`, `cta`, and `shots`. Return 4 to 8 shots. Each shot includes `shotNumber` (1-based), `purpose` (hook/detail/action/hero/cta), `shotType`, `duration`, `cameraMovement`, `animationTemplate`, `subjectPosition`, `cameraStart`, `cameraEnd`, `instruction`, `voiceover`, `onScreenText`, and `difficulty` (easy/medium/advanced), plus `title` and `description`.
-Use these movements: static, pan_left, pan_right, tilt_up, tilt_down, dolly_in, dolly_out, tracking, orbit, reveal, handheld. Use these shot types: extreme_wide, wide, medium, close_up, extreme_close_up. Durations must be 1.5 to 12 seconds and add up close to the requested total.
+Return ONLY one JSON object with `title`, `concept`, `style`, `goal`, `totalDuration`, `hook`, `cta`, and `shots`. Choose a natural number of distinct shots for this story: usually 3 to 12, with fewer for a simple idea and more only when the description has meaningful story beats. Do not force every reel into the same shot count or timing. Each shot includes `shotNumber` (1-based), `purpose` (hook/detail/action/hero/cta), `shotType`, `duration`, `cameraMovement`, `animationTemplate`, `subjectPosition`, `cameraStart`, `cameraEnd`, `instruction`, `voiceover`, `onScreenText`, and `difficulty` (easy/medium/advanced), plus `title` and `description`.
+Use these movements: static, pan_left, pan_right, tilt_up, tilt_down, dolly_in, dolly_out, tracking, orbit, reveal, handheld. Use these shot types: extreme_wide, wide, medium, close_up, extreme_close_up. Each duration must be 1.5 to 12 seconds; when there is no requested total, choose a natural total for the story.
 Keep each on-camera `instruction` to one simple sentence of 12 words or fewer, in the requested language. It must tell the creator what to frame, what single move to make, and where to finish; beginner wording uses everyday words and no camera jargon. Make `cameraStart`, `cameraEnd`, and `subjectPosition` agree with the instruction and movement animation. Keep descriptions to one useful sentence. Voiceover and on-screen text are optional; use empty strings when they do not help the story.
 Write `concept` as a warm, natural mini-script of 2–4 flowing sentences that could be spoken by a real person. Tell this creator's specific story and emotional progression; do not summarize the production plan or write a list of commands. Give each shot description a human reason to care about the moment, while keeping camera instructions separate and brief. Use natural phrasing and varied rhythm; avoid stock openings, clichés, generic praise, filler, stiff AI-sounding language, and repeated wording. Add concise, speakable voiceover only when it strengthens this story; otherwise leave it empty. Keep on-screen text short and purposeful.
 Build a beginning, middle, and ending that tells this user's story. Make the opening a visual hook or reveal, not an automatic generic wide shot. Each later shot must add a new story beat, subject, scale, or angle; finish with a memorable payoff or a goal-specific invitation. For an office, showroom, shop, or interior showcase, reveal the entrance or strongest real view first, then show the space, distinctive features, real activity if present, and a final hero view. Use opening doors only when the scan or creator confirms doors. For a ceremony, build from anticipation and meaningful details toward authentic people or rituals only when present, then a personal closing memory. For travel, reveal the place, guide the viewer through a safe path, show a distinctive landmark or texture, and finish on the strongest view. For other ideas, derive a fresh arc from the creator's explanation rather than reusing a category template.
@@ -1272,9 +1274,12 @@ def normalise_storyboard_shot(shot: Any, index: int, total: int) -> Dict[str, An
 
 
 def normalise_storyboard(shots: Any) -> List[Dict[str, Any]]:
-    if not isinstance(shots, list) or not 4 <= len(shots) <= 8:
-        raise ValueError("storyboard must contain four to eight shots")
-    return [normalise_storyboard_shot(shot, index, len(shots)) for index, shot in enumerate(shots)]
+    if not isinstance(shots, list) or not 3 <= len(shots) <= 12:
+        raise ValueError("storyboard must contain three to twelve shots")
+    normalized = [normalise_storyboard_shot(shot, index, len(shots)) for index, shot in enumerate(shots)]
+    if sum(shot["duration_seconds"] for shot in normalized) > 90:
+        raise ValueError("storyboard duration exceeds ninety seconds")
+    return normalized
 
 
 def storyboard_is_valid(shots: Any) -> bool:
@@ -1291,8 +1296,16 @@ def fallback_storyboard(doc: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]
     This is deliberately grounded in the creator's wording and (when available)
     the environment scan, instead of substituting a generic shot list.
     """
-    duration = max(1, int(round(float(doc.get("duration_seconds") or 30))))
-    count = max(4, min(8, int(math.ceil(duration / 6))))
+    purpose = str(doc.get("purpose") or doc.get("title") or "").strip()
+    auto_duration = doc.get("duration_mode", "auto") == "auto"
+    if auto_duration:
+        words = re.findall(r"\b[\w'-]+\b", purpose)
+        story_beats = len(re.findall(r"\b(then|before|after|while|journey|story|from|through|finally|celebrate|process|steps|behind)\b", purpose, re.I))
+        duration = max(12, min(60, int(round(10 + len(words) * 0.45 + story_beats * 4))))
+        count = max(3, min(8, int(math.ceil(duration / 6))))
+    else:
+        duration = max(1, int(round(float(doc.get("duration_seconds") or 30))))
+        count = max(4, min(8, int(math.ceil(duration / 6))))
     shot_duration = round(duration / count, 1)
     durations = [shot_duration] * count
     durations[-1] = round(duration - sum(durations[:-1]), 1)
@@ -1481,6 +1494,11 @@ async def generate_storyboard(pid: str, body: Optional[StoryboardRequest] = None
         if not has_reliable_scan else ""
     )
     style_context = creator_style_prompt(user.get("creator_style_profile", {})) if doc.get("use_creator_style") else ""
+    duration_instruction = (
+        "DURATION MODE: AUTO. Read the creator's description and scan, then choose a total reel length between 8 and 90 seconds that gives this exact story enough room without padding it. Choose the number of shots to match its meaningful beats; 3 to 12 is a practical range, not a template. Give each shot its own duration based on the action and story beat. Do not use the saved placeholder duration as a target."
+        if doc.get("duration_mode", "auto") == "auto"
+        else f"DURATION MODE: CREATOR TARGET. Aim for {doc['duration_seconds']} seconds, but vary shot count from 3 to 12 based on the story and distribute time naturally across its beats."
+    )
     prompt = f"""Create a highly customized script and shot list in {language} for this video:
 Title: {doc['title']}
 Type: {doc['shoot_type']}
@@ -1489,14 +1507,14 @@ Creator's explanation of the video and desired story: {doc['purpose'] or 'No add
 Mood: {doc['mood'] or 'cinematic'}
 Style: {doc['style']}
 Platform: {doc['platform']}
-Target duration: {doc['duration_seconds']} seconds
+{duration_instruction}
 Audience: {doc['audience'] or 'general'}
 Selected language: {language}
 Creator skill level: {user.get('creator_skill_level', 'beginner')}
 {style_context}
 Environment scan: {scene_context}
 
-Use the title and creator's explanation as the source of truth. Notice cultural/event references and make the storytelling, shot ideas, props/details, and narration fit that occasion. Use the environment scan to choose actual subjects, positions, backgrounds, lighting, and safe feasible framing; never claim a person or object is present unless the scan supports it. Return the complete structured storyboard with title, concept, style, goal, totalDuration, hook, cta, and 4 to 8 shots whose durations add up close to {doc['duration_seconds']} seconds. Write `concept` as a warm, natural 2–4 sentence mini-script in {language}, with phrasing a real person could say aloud. Tell this creator's specific story from its opening to an emotional payoff; do not make it a plan summary, shot list, or generic promotional copy. Make each shot `description` conversational and explain why that moment matters, while keeping the practical camera `instruction` short and separate. Use specific supported details, natural sentence rhythm, and avoid clichés, filler, exaggerated claims, and repeated phrases. Add concise, speakable `voiceover` only when it improves this story; otherwise leave it empty. Keep on-screen text short and worth reading.
+Use the title and creator's explanation as the source of truth. Notice cultural/event references and make the storytelling, shot ideas, props/details, and narration fit that occasion. Use the environment scan to choose actual subjects, positions, backgrounds, lighting, and safe feasible framing; never claim a person or object is present unless the scan supports it. Return the complete structured storyboard with title, concept, style, goal, totalDuration, hook, cta, and a story-appropriate number of shots. In auto mode, make the shot count and total duration a real decision based on this description, not a reused preset; each shot duration must be 1.5 to 12 seconds and the durations must add up to totalDuration. In target mode, aim close to the creator's requested total while still varying the shot count to fit the story. Write `concept` as a warm, natural 2–4 sentence mini-script in {language}, with phrasing a real person could say aloud. Tell this creator's specific story from its opening to an emotional payoff; do not make it a plan summary, shot list, or generic promotional copy. Make each shot `description` conversational and explain why that moment matters, while keeping the practical camera `instruction` short and separate. Use specific supported details, natural sentence rhythm, and avoid clichés, filler, exaggerated claims, and repeated phrases. Add concise, speakable `voiceover` only when it improves this story; otherwise leave it empty. Keep on-screen text short and worth reading.
 Make it practical to film on a phone and tailored to {doc['platform']}. Match the creator skill level in every instruction and use everyday words. Every instruction must name its target, starting composition, one camera action, and finishing composition in 12 words or fewer. Fill `cameraStart`, `cameraEnd`, and `subjectPosition` with matching concrete framing details. Choose a visual story arc for this exact idea: for an office/showroom, use an entrance reveal only when one is visible or described, then the hero space, distinctive features, authentic activity, and final view; for ceremonies, move from anticipation through meaningful details to a real emotional payoff; for travel, reveal the location, move through it, find a distinctive detail, then end on its strongest view. For all other ideas, invent a fresh sequence from the creator's explanation. Use the stored creator style only as a light preference when it fits this description and setting. Make every shot filmable and different from the previous one. Do not use generic directions or repeat one object across the reel. Without a scan, do not invent props, people, doors, or actions. Before returning, silently critique each shot and rewrite any vague, repetitive, unsafe, scan-inconsistent, or movement-mismatched direction."""
 
     ai_generated = True
@@ -1506,10 +1524,10 @@ Make it practical to film on a phone and tailored to {doc['platform']}. Match th
         response_data = extract_json(raw)
         if isinstance(response_data, dict):
             proposed_shots = response_data.get("shots")
-            if isinstance(proposed_shots, list) and len(proposed_shots) < 4:
+            if isinstance(proposed_shots, list) and len(proposed_shots) < 3:
                 repair_prompt = (
-                    f"{prompt}\n\nThe last draft had only {len(proposed_shots)} shots, so it was incomplete. "
-                    "Return a complete JSON storyboard with at least four distinct shots; shorten descriptions if needed."
+                    f"{prompt}\n\nThe last draft had only {len(proposed_shots)} shots, so it lacked a clear story arc. "
+                    "Return at least three distinct, purposeful shots; shorten descriptions if needed."
                 )
                 raw = await chat_once(STORYBOARD_SYSTEM, repair_prompt, max_output_tokens=4096, max_attempts=1)
                 response_data = extract_json(raw)
@@ -1563,7 +1581,8 @@ Make it practical to film on a phone and tailored to {doc['platform']}. Match th
         previous_status = existing_status_by_index.get(i)
         s["status"] = previous_status if previous_status in {"captured", "retake"} else "pending"
 
-    doc.update({"storyboard": shots, "storyboard_plan": plan, "script": script, "status": "storyboarded",
+    doc.update({"storyboard": shots, "storyboard_plan": plan, "script": script,
+                "duration_seconds": int(round(plan["totalDuration"])), "status": "storyboarded",
                 "storyboard_ai_generated": ai_generated,
                 "storyboard_user_edited": False,
                 "updated_at": datetime.now(timezone.utc).isoformat()})
