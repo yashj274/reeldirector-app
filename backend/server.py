@@ -483,7 +483,6 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
     next_input = 1
     # The preview displays the first active image on this track above later ones.
     for index, item in enumerate(reversed(overlays or [])):
-        command.extend(["-loop", "1", "-framerate", str(fps), "-i", str(item["file"])])
         frame = item.get("frame") or {}
         image_w = max(2, round(width * float(frame.get("width", 38)) / 100))
         image_h = max(2, round(height * float(frame.get("height", 30)) / 100))
@@ -492,12 +491,21 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
         radius = min(image_w / 2, image_h / 2, float(frame.get("radius", 18)) * width / 1080)
         mask = (f"if(lte(pow(max(max({radius:.2f}-X,X-(W-1-{radius:.2f})),0),2)"
                 f"+pow(max(max({radius:.2f}-Y,Y-(H-1-{radius:.2f})),0),2),{radius**2:.2f}),255,0)")
-        graph.append(
-            f"[{next_input}:v]scale={image_w}:{image_h}:force_original_aspect_ratio=increase,"
+        image_filter = (
+            f"scale={image_w}:{image_h}:force_original_aspect_ratio=increase,"
             f"crop={image_w}:{image_h},setsar=1,format=rgba,"
             f"drawbox=x=0:y=0:w=iw:h=ih:color=white:t={max(1, round(width*.004))},"
-            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*({mask})/255'[image{index}]"
+            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*({mask})/255',format=rgba"
         )
+        # Rounded corners and borders on a still image only need to be computed once.
+        prepared_image = concat_file.parent / f"prepared-overlay-{index}.png"
+        subprocess.run(
+            [ffmpeg, "-y", "-filter_threads", "1", "-i", str(item["file"]), "-vf", image_filter,
+             "-frames:v", "1", "-threads:v", "1", "-compression_level", "1", str(prepared_image)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=45,
+        )
+        command.extend(["-loop", "1", "-framerate", str(fps), "-i", str(prepared_image)])
+        graph.append(f"[{next_input}:v]setsar=1[image{index}]")
         start, end = float(item.get("start", 0)), float(item.get("start", 0)) + float(item.get("duration", 3))
         graph.append(f"[{video_label}][image{index}]overlay=x={x:.2f}:y={y:.2f}:"
                      f"enable='between(t,{start:.3f},{end:.3f})':shortest=1[overlay{index}]")
