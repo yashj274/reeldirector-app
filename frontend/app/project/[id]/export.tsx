@@ -12,12 +12,17 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
+import { useFonts } from 'expo-font';
 
 import { api } from '@/src/api';
 import { isClipProgress, shouldAdvanceOnEndEvent } from '@/src/reelPlayback';
 import { syncClipEndsToBeats } from '@/src/beatSync';
 import { locateTimelinePosition, splitTimelineRange } from '@/src/timeline';
 import { theme } from '@/src/theme';
+import { EDITOR_FONT_ASSETS } from '@/src/editor/fontAssets';
+import { expoFontFamily } from '@/src/editor/fonts';
+import { TEXT_STYLES, getTextStyle } from '@/src/editor/textStyles';
+import { textSizePixels } from '@/src/editor/textScale';
 
 type ClipEdit = {
   shot_index: number;
@@ -51,6 +56,8 @@ type EditorSettings = {
   clip_splits: Record<number, number[]>;
   title_text: string;
   title_font: string;
+  title_style_id: string;
+  title_animation: string;
   title_position: string;
   title_color: string;
   title_size: string;
@@ -59,6 +66,7 @@ type EditorSettings = {
   original_volume: number;
   captions_enabled: boolean;
   caption_edits: CaptionEdit[];
+  render_provider: 'creatomate' | 'ffmpeg';
 };
 
 type ToolName = 'Audio' | 'Text' | 'Voice' | 'Captions' | 'Overlay' | 'Filter' | 'Export settings';
@@ -76,25 +84,28 @@ const CLIP_FILTERS = [
   { id: 'original', label: 'Original' }, { id: 'warm', label: 'Warm' },
   { id: 'cool', label: 'Cool' }, { id: 'mono', label: 'B&W' },
   { id: 'vivid', label: 'Vivid' }, { id: 'vintage', label: 'Vintage' },
-  { id: 'soft', label: 'Soft' },
+  { id: 'soft', label: 'Soft' }, { id: 'film', label: 'Film' },
 ];
 
 const DEFAULT_SETTINGS: EditorSettings = {
   aspect_ratio: '9:16', fit_mode: 'fill', resolution: '720p', fps: 30, editing_style: 'cinematic', pacing: 'balanced',
-  clip_order: [], clip_edits: [], clip_splits: {}, title_text: '', title_font: 'sans',
+  clip_order: [], clip_edits: [], clip_splits: {}, title_text: '', title_font: 'inter', title_style_id: 'clean', title_animation: 'fade',
   title_position: 'bottom', title_color: 'white', title_size: 'medium',
-  music_volume: 25, voiceover_volume: 100, original_volume: 80, captions_enabled: false, caption_edits: [],
+  music_volume: 25, voiceover_volume: 100, original_volume: 80, captions_enabled: false, caption_edits: [], render_provider: 'ffmpeg',
 };
 
 const CAPTION_FONTS = [
-  ['sans', 'Sans'], ['serif', 'Serif'], ['mono', 'Mono'],
-  ['bold', 'Bold'], ['condensed', 'Condensed'], ['serif_bold', 'Serif bold'],
+  ['inter', 'Clean'], ['montserrat', 'Modern'], ['space-grotesk', 'Tech'],
+  ['bebas', 'Title'], ['anton', 'Bold'], ['archivo-black', 'Heavy'],
+  ['fraunces', 'Soft serif'], ['playfair', 'Elegant'], ['dm-serif', 'Editorial'],
+  ['caveat', 'Handwritten'], ['marker', 'Marker'],
 ];
 
 const FILTERS: Record<string, string> = {
   warm: 'sepia(0.16) saturate(1.12)', cool: 'hue-rotate(9deg) saturate(1.06)',
   mono: 'grayscale(1) contrast(1.04)', vivid: 'saturate(1.22) contrast(1.08)',
   vintage: 'sepia(0.24) saturate(0.8) contrast(0.92)', soft: 'saturate(0.92) contrast(0.92)',
+  film: 'sepia(0.12) saturate(0.88) contrast(0.96)',
   cinematic: 'contrast(1.08) saturate(0.9)', luxury: 'contrast(1.08) saturate(0.94)',
   editorial: 'contrast(1.06) saturate(0.86)', action: 'contrast(1.12) saturate(1.12)',
   fast_pace: 'contrast(1.08) saturate(1.12)', minimal: 'saturate(0.85)',
@@ -107,10 +118,8 @@ function shotIndex(clip: any, fallback: number) {
   return Number.isInteger(value) ? value : fallback;
 }
 
-function fontFamily(font: string) {
-  return ({
-    serif: 'Georgia', mono: 'Courier New', bold: 'Arial', condensed: 'Arial Narrow', serif_bold: 'Georgia',
-  } as Record<string, string>)[font];
+function fontFamily(font: string, weight: 400 | 500 | 600 | 700 | 800 | 900 = 700) {
+  return expoFontFamily(font, weight);
 }
 
 function makeSettings(project: any): EditorSettings {
@@ -175,6 +184,9 @@ function makeSettings(project: any): EditorSettings {
   return {
     ...DEFAULT_SETTINGS,
     ...saved,
+    render_provider: saved.render_provider === 'creatomate' ? 'creatomate' : 'ffmpeg',
+    title_style_id: saved.title_style_id === 'custom' || TEXT_STYLES.some((style) => style.id === saved.title_style_id) ? saved.title_style_id : 'clean',
+    title_animation: ['none', 'fade', 'pop', 'slide-up', 'typewriter', 'word-by-word'].includes(saved.title_animation) ? saved.title_animation : 'fade',
     pacing: ['relaxed', 'balanced', 'fast'].includes(saved.pacing) ? saved.pacing : 'balanced',
     title_font: CAPTION_FONTS.some(([font]) => font === saved.title_font) ? saved.title_font : 'sans',
     music_volume: Number.isFinite(musicVolume) ? (musicVolume <= 1 ? musicVolume * 100 : musicVolume) : DEFAULT_SETTINGS.music_volume,
@@ -203,6 +215,7 @@ function clipWindow(clip: any, shot: number, edit: ClipEdit, sourceDurations: Re
 export default function Export() {
   const { id, clip: clipParam } = useLocalSearchParams<{ id: string; clip?: string }>();
   const router = useRouter();
+  const [fontsLoaded] = useFonts(EDITOR_FONT_ASSETS);
   const { height: windowHeight, width: windowWidth } = useWindowDimensions();
   const [settings, setSettings] = useState<EditorSettings>(DEFAULT_SETTINGS);
   const [project, setProject] = useState<any>(null);
@@ -228,6 +241,7 @@ export default function Export() {
   const [captionLayout, setCaptionLayout] = useState({ width: 0, height: 0 });
   const [timelineWidth, setTimelineWidth] = useState(0);
   const [addingClip, setAddingClip] = useState(false);
+  const [selectedBroll, setSelectedBroll] = useState<string | null>(null);
   const [retakingClip, setRetakingClip] = useState(false);
   const [addClipError, setAddClipError] = useState('');
   const historyBack = useRef<EditorSettings[]>([]);
@@ -395,6 +409,8 @@ export default function Export() {
   const captionValuesRef = useRef(activeCaption);
   captionValuesRef.current = activeCaption;
   const activeFilter = activeEdit?.filter_preset || 'original';
+  const brollItems: any[] = project?.edit_json?.tracks?.find((track: any) => track.kind === 'overlay')?.items || [];
+  const activeBroll = brollItems.find((item) => timelinePosition >= item.start && timelinePosition < item.start + item.duration);
   const nextSegment = activeSegmentIndex >= 0 ? orderedSegments[activeSegmentIndex + 1] : undefined;
   const nextIncludedClip = nextSegment?.clip || null;
   const nextIncludedShot = nextSegment?.shot ?? null;
@@ -416,6 +432,20 @@ export default function Export() {
     ? Math.max(0, Math.min(100, timelinePosition / fullTimelineDuration * 100))
     : 0;
   const webPreviewFilter = [FILTERS[activeFilter], FILTERS[settings.editing_style], activeEdit ? `brightness(${1 + activeEdit.brightness})` : null].filter(Boolean).join(' ');
+  const titleProgress = playing ? Math.max(0, Math.min(1, timelinePosition / 0.45)) : 1;
+  const titleAnimationStyle = settings.title_animation === 'fade'
+    ? { opacity: titleProgress }
+    : settings.title_animation === 'pop'
+      ? { opacity: titleProgress, transform: [{ scale: 0.65 + titleProgress * 0.35 }] }
+      : settings.title_animation === 'slide-up'
+        ? { opacity: titleProgress, transform: [{ translateY: 18 * (1 - titleProgress) }] }
+        : {};
+  const titleWords = settings.title_text.split(/\s+/);
+  const displayedTitle = settings.title_animation === 'typewriter'
+    ? settings.title_text.slice(0, Math.ceil(settings.title_text.length * titleProgress))
+    : settings.title_animation === 'word-by-word'
+      ? titleWords.slice(0, Math.ceil(titleWords.length * titleProgress)).join(' ')
+      : settings.title_text;
   const spin = rot.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
   const previewHeight = Math.max(235, Math.min(windowHeight * 0.55, 560));
   const [ratioWidth, ratioHeight] = settings.aspect_ratio.split(':').map(Number);
@@ -656,7 +686,19 @@ export default function Export() {
   const update = <K extends keyof EditorSettings>(key: K, value: EditorSettings[K]) => {
     setSettings((current) => {
       pushHistory(current);
-      return { ...current, [key]: value };
+      const textStyleKey = ['title_font', 'title_size', 'title_color', 'title_position', 'title_animation'].includes(String(key));
+      return { ...current, [key]: value, ...(textStyleKey ? { title_style_id: 'custom' } : {}) };
+    });
+    setDirty(true);
+    setNotice('');
+  };
+
+  const applyTextStyle = (styleId: string) => {
+    const preset = getTextStyle(styleId);
+    setSettings((current) => {
+      pushHistory(current);
+      return { ...current, title_style_id: preset.id, title_font: preset.font, title_size: preset.size,
+        title_color: preset.color, title_position: preset.position, title_animation: preset.animation };
     });
     setDirty(true);
     setNotice('');
@@ -922,7 +964,7 @@ export default function Export() {
     try {
       await api.saveEditSettings(id, settings as any);
       setDirty(false);
-      await api.export(id, settings as any, () => setRenderStage('Preparing your upload-ready video…'));
+      await api.export(id, settings as any, (status) => setRenderStage(status));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       router.replace({ pathname: '/project/[id]/final', params: { id } });
     } catch (error: any) {
@@ -1103,6 +1145,39 @@ export default function Export() {
     } finally { setAudioBusy(false); }
   };
 
+  const chooseBrollImage = async () => {
+    if (!id) return;
+    setToolError('');
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: 'image/*', copyToCacheDirectory: true, multiple: false });
+      const file = result.assets?.[0];
+      if (result.canceled || !file) return;
+      setAudioBusy(true);
+      await api.addBrollImage(id, { uri: file.uri, name: file.name, mimeType: file.mimeType || undefined, file: file.file || undefined, size: file.size || undefined }, timelinePosition, Math.min(3, Math.max(0.5, estimatedDuration - timelinePosition)));
+      const refreshed = await api.getProject(id);
+      setProject(refreshed);
+      const added = refreshed.edit_json?.tracks?.find((track: any) => track.kind === 'overlay')?.items?.slice(-1)[0];
+      setSelectedBroll(added?.id || null);
+      setNotice('B-roll image added to the timeline');
+    } catch (error: any) {
+      setToolError(error.message || 'Could not add this B-roll image.');
+    } finally { setAudioBusy(false); }
+  };
+
+  const removeSelectedBroll = async () => {
+    if (!id || !selectedBroll) return;
+    setAudioBusy(true);
+    setToolError('');
+    try {
+      await api.removeBroll(id, selectedBroll);
+      setProject(await api.getProject(id));
+      setSelectedBroll(null);
+      setNotice('B-roll image removed');
+    } catch (error: any) {
+      setToolError(error.message || 'Could not remove this B-roll image.');
+    } finally { setAudioBusy(false); }
+  };
+
   const chooseVoiceover = async () => {
     if (!id) return;
     setToolError('');
@@ -1249,15 +1324,24 @@ export default function Export() {
             {Platform.OS !== 'web' && activeEdit?.brightness ? (
               <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: activeEdit.brightness > 0 ? '#fff' : '#000', opacity: Math.min(0.5, Math.abs(activeEdit.brightness)) }]} />
             ) : null}
+            {activeBroll?.signed_url ? (
+              <Image source={{ uri: activeBroll.signed_url }} contentFit="cover" style={{
+                position: 'absolute', left: `${Math.max(0, Number(activeBroll.frame?.x ?? 70) - Number(activeBroll.frame?.width ?? 38) / 2)}%`,
+                top: `${Math.max(0, Number(activeBroll.frame?.y ?? 72) - Number(activeBroll.frame?.height ?? 30) / 2)}%`,
+                width: `${Number(activeBroll.frame?.width ?? 38)}%`, height: `${Number(activeBroll.frame?.height ?? 30)}%`,
+                borderRadius: Number(activeBroll.frame?.radius ?? 18) * previewMediaWidth / 1080, borderWidth: Math.max(1, previewMediaWidth * 0.004), borderColor: '#fff',
+              }} />
+            ) : null}
             {showTitleOverlay && (
               <View pointerEvents="none" style={[styles.titleOverlay, settings.title_position === 'top' ? styles.titleTop : settings.title_position === 'center' ? styles.titleCenter : styles.titleBottom]}>
                 <Text numberOfLines={2} style={[
                   styles.previewTitle,
-                  { color: TITLE_COLORS[settings.title_color] || '#fff', fontFamily: fontFamily(settings.title_font),
-                    fontSize: settings.title_size === 'large' ? 23 : settings.title_size === 'small' ? 14 : 18,
-                    fontWeight: settings.title_font === 'bold' || settings.title_font === 'serif_bold' ? '900' : '800' },
+                  { color: TITLE_COLORS[settings.title_color] || '#fff', fontFamily: fontsLoaded ? fontFamily(settings.title_font, ['bebas', 'anton', 'archivo-black', 'dm-serif', 'marker'].includes(settings.title_font) ? 400 : 700) : undefined,
+                    fontSize: textSizePixels('title', settings.title_size, Math.min(previewMediaWidth, previewMediaHeight)),
+                    fontWeight: fontsLoaded ? undefined : '700',
+                    ...titleAnimationStyle },
                   settings.title_color === 'black' && styles.previewTitleDark,
-                ]}>{settings.title_text}</Text>
+                ]}>{displayedTitle}</Text>
               </View>
             )}
             {settings.captions_enabled && !!captionText && (captionIsInTime || captionPositionMode) && (
@@ -1280,9 +1364,9 @@ export default function Export() {
                 <Text numberOfLines={3} style={[
                   styles.captionText,
                   {
-                    fontSize: activeCaption.size === 'large' ? 22 : activeCaption.size === 'small' ? 12 : 16,
-                    fontFamily: fontFamily(activeCaption.font),
-                    fontWeight: activeCaption.font === 'bold' || activeCaption.font === 'serif_bold' ? '900' : '700',
+                    fontSize: textSizePixels('caption', activeCaption.size, Math.min(previewMediaWidth, previewMediaHeight)),
+                    fontFamily: fontsLoaded ? fontFamily(activeCaption.font, ['bebas', 'anton', 'archivo-black', 'dm-serif', 'marker'].includes(activeCaption.font) ? 400 : 700) : undefined,
+                    fontWeight: fontsLoaded ? undefined : '700',
                   },
                 ]}>{captionText}</Text>
               </View>
@@ -1358,6 +1442,19 @@ export default function Export() {
                 <Ionicons name="videocam-outline" size={20} color="#fff" /><Text style={styles.emptyTimelineText}>Record your first clip</Text>
               </Pressable>
             )}
+          </View>
+          <View style={styles.captionTrackHeader}>
+            <Ionicons name="images-outline" size={15} color="#B9BBC3" />
+            <Text style={styles.captionTrackTitle}>B-ROLL</Text>
+            <Text style={styles.trackTag}>Overlays · {brollItems.length}</Text>
+          </View>
+          <View style={styles.captionTrack}>
+            {brollItems.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.captionStrip}>
+              {brollItems.map((item) => <Pressable key={item.id} onPress={() => { setSelectedBroll(item.id); openTool('Overlay'); }} style={[styles.brollTimelineItem, selectedBroll === item.id && styles.choiceOn]}>
+                {item.signed_url ? <Image source={{ uri: item.signed_url }} contentFit="cover" style={styles.brollTimelineImage} /> : null}
+                <Text style={styles.brollTimelineText} numberOfLines={1}>{Math.floor(item.start)}s · {Math.ceil(item.duration)}s</Text>
+              </Pressable>)}
+            </ScrollView> : <Pressable style={styles.emptyBrollTrack} onPress={() => openTool('Overlay')}><Ionicons name="add" size={16} color="#D6D7DC" /><Text style={styles.trackPlaceholder}>Tap Overlay to add B-roll</Text></Pressable>}
           </View>
           <View style={styles.captionTrackHeader}>
             <Ionicons name="chatbox-ellipses-outline" size={15} color="#B9BBC3" />
@@ -1465,6 +1562,8 @@ export default function Export() {
             <Text style={styles.sheetDescription}>Add a title that appears in the preview and finished video.</Text>
             <TextInput value={settings.title_text} onChangeText={(value) => update('title_text', value)} placeholder="Write your title" placeholderTextColor="#747780" maxLength={80} style={styles.titleInput} accessibilityLabel="Video title text" />
             <Text style={styles.characterCount}>{settings.title_text.length}/80</Text>
+            <Text style={styles.rowLabel}>ONE-TAP STYLE</Text>
+            <View style={styles.choiceGrid}>{TEXT_STYLES.map((preset) => <Choice key={preset.id} label={preset.label} active={settings.title_style_id === preset.id} onPress={() => applyTextStyle(preset.id)} />)}</View>
             <Text style={styles.rowLabel}>FONT</Text>
             <ChoiceRow options={CAPTION_FONTS as string[][]} selected={settings.title_font} onSelect={(value) => update('title_font', value)} />
             <Text style={styles.rowLabel}>POSITION</Text>
@@ -1473,6 +1572,11 @@ export default function Export() {
             <ChoiceRow options={['small', 'medium', 'large'].map((value) => [value, value])} selected={settings.title_size} onSelect={(value) => update('title_size', value)} />
             <Text style={styles.rowLabel}>COLOR</Text>
             <ChoiceRow options={['white', 'gold', 'pink', 'black'].map((value) => [value, value])} selected={settings.title_color} onSelect={(value) => update('title_color', value)} />
+            <Text style={styles.rowLabel}>ANIMATION</Text>
+            <ChoiceRow options={[
+              ['none', 'None'], ['fade', 'Fade'], ['pop', 'Pop'], ['slide-up', 'Slide up'],
+              ['typewriter', 'Typewriter'], ['word-by-word', 'Word by word'],
+            ]} selected={settings.title_animation} onSelect={(value) => update('title_animation', value)} />
           </>
         ) : null}
 
@@ -1533,7 +1637,10 @@ export default function Export() {
 
         {tool === 'Overlay' ? (
           <>
-            <Text style={styles.sheetDescription}>Set the title overlay placement and the frame shape for your finished reel.</Text>
+            <Text style={styles.sheetDescription}>Add a picture-in-picture B-roll image and set the finished reel framing.</Text>
+            <ActionButton icon="images-outline" label="Add B-roll image" onPress={() => void chooseBrollImage()} loading={audioBusy} />
+            {selectedBroll ? <ActionButton icon="trash-outline" label="Remove selected B-roll" onPress={() => void removeSelectedBroll()} loading={audioBusy} /> : null}
+            <Text style={styles.sheetFootnote}>{brollItems.length ? 'The selected B-roll appears on its own timeline row.' : 'Choose an image; it will appear for 3 seconds at the playhead.'}</Text>
             <Text style={styles.rowLabel}>TITLE PLACEMENT</Text>
             <ChoiceRow options={['top', 'center', 'bottom'].map((value) => [value, value])} selected={settings.title_position} onSelect={(value) => update('title_position', value)} />
             <Text style={styles.rowLabel}>VIDEO SHAPE</Text>
@@ -1562,6 +1669,7 @@ export default function Export() {
                   <Ionicons name="cut-outline" size={18} color="#fff" /><Text style={styles.actionButtonText}>Split at playhead</Text>
                 </Pressable>
                 <View style={styles.choiceGrid}>{CLIP_FILTERS.map((filter) => <Choice key={filter.id} label={filter.label} active={activeEdit.filter_preset === filter.id} onPress={() => updateClip(activeShot, { filter_preset: filter.id })} />)}</View>
+                {Platform.OS !== 'web' ? <Text style={styles.sheetFootnote}>Your device shows a simplified filter preview. The exported video applies the full effect.</Text> : null}
                 <View style={styles.trimSection}>
                   <View style={{ flex: 1 }}><Text style={styles.trimHeading}>Clip brightness</Text><Text style={styles.trimValueText}>{Math.round(activeEdit.brightness * 100)}%</Text></View>
                   <Pressable style={styles.smallIconButton} onPress={() => updateClip(activeShot, { brightness: Math.max(-0.5, Math.round((activeEdit.brightness - 0.05) * 100) / 100) })} accessibilityLabel="Lower brightness"><Ionicons name="remove" size={19} color="#fff" /></Pressable>
@@ -1594,6 +1702,8 @@ export default function Export() {
         {tool === 'Export settings' ? (
           <>
             <Text style={styles.sheetDescription}>Choose a format before exporting your reel.</Text>
+            <Text style={styles.rowLabel}>RENDER ENGINE</Text>
+            <ChoiceRow options={[['ffmpeg', 'Built-in renderer'], ['creatomate', 'Creatomate (optional)']]} selected={settings.render_provider} onSelect={(value) => update('render_provider', value as EditorSettings['render_provider'])} />
             <Text style={styles.rowLabel}>VIDEO SHAPE</Text>
             <ChoiceRow options={[[ '9:16', 'Reels / Shorts' ], ['1:1', 'Square'], ['16:9', 'YouTube']]} selected={settings.aspect_ratio} onSelect={(value) => update('aspect_ratio', value)} />
             <Text style={styles.rowLabel}>RESOLUTION</Text>
@@ -1618,7 +1728,7 @@ function editForShot(settings: EditorSettings, shot: number): ClipEdit {
 function nativeTint(clipFilter: string, look: string) {
   const selected = clipFilter !== 'original' ? clipFilter : look;
   const tints: Record<string, string> = {
-    warm: 'rgba(233,139,65,0.15)', cool: 'rgba(62,129,220,0.15)', vintage: 'rgba(185,139,78,0.17)',
+    warm: 'rgba(233,139,65,0.15)', cool: 'rgba(62,129,220,0.15)', vintage: 'rgba(185,139,78,0.17)', film: 'rgba(125,92,58,0.10)',
     soft: 'rgba(255,255,255,0.08)', luxury: 'rgba(38,24,13,0.15)', mono: 'rgba(255,255,255,0.14)', vivid: 'rgba(224,17,95,0.08)',
   };
   return tints[selected] || 'transparent';
@@ -1904,5 +2014,8 @@ const styles = StyleSheet.create({
   reorderRow: { minHeight: 42, marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderColor: '#2C2E35', flexDirection: 'row', alignItems: 'center', gap: 7 }, reorderButton: { minHeight: 31, borderRadius: 16, paddingHorizontal: 9, backgroundColor: '#30323A', flexDirection: 'row', alignItems: 'center', gap: 4 }, reorderText: { color: '#E4E5E9', fontSize: 10, fontWeight: '700' },
   trimControl: { minHeight: 35, flexDirection: 'row', alignItems: 'center', gap: 3 }, trimLabel: { color: '#93959D', fontSize: 9, fontWeight: '800' }, tinyButton: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#33353D', alignItems: 'center', justifyContent: 'center' },
   excludeRow: { minHeight: 43, flexDirection: 'row', alignItems: 'center', gap: 9, borderTopWidth: 1, borderColor: '#2C2E35', marginTop: 9 }, excludeText: { color: '#E8E9EC', fontSize: 12, fontWeight: '600' },
+  brollTimelineItem: { width: 94, height: 60, marginRight: 8, borderRadius: 8, overflow: 'hidden', backgroundColor: '#24262D', borderWidth: 1, borderColor: '#383A43' },
+  brollTimelineImage: { width: '100%', height: 40 }, brollTimelineText: { color: '#D0D1D6', fontSize: 9, fontWeight: '700', paddingHorizontal: 5, paddingVertical: 3 },
+  emptyBrollTrack: { height: 51, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1B1C21' },
   exportSummary: { minHeight: 37, justifyContent: 'center', alignItems: 'center', marginVertical: 13, borderRadius: 9, backgroundColor: '#24262D' }, exportSummaryText: { color: '#D5D6DB', fontSize: 11, fontWeight: '700' },
 });

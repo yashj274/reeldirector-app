@@ -23,3 +23,5 @@ services:
         value: gemini-3.5-flash-lite
       - key: ADMIN_EMAILS
         sync: false
+      - key: RENDER_WORKER_AUTOSTART
+        value: "1"

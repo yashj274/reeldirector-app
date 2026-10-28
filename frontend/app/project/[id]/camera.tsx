@@ -13,6 +13,7 @@ import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system/legacy';
 
 import { api, DirectorGuidance } from '@/src/api';
+import { pickMimeType } from '@/src/camera/webRecorder';
 import { logBeta } from '@/src/betaLog';
 import { theme } from '@/src/theme';
 import { ClipVideoPreview } from '@/src/ClipVideoPreview';
@@ -224,7 +225,7 @@ export default function DirectorCamera() {
     const nextStream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: preferredFacing === 'back' ? 'environment' : 'user' },
-        width: { ideal: 1280 }, height: { ideal: 720 },
+        width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 },
       },
       audio: false,
     });
@@ -541,17 +542,10 @@ export default function DirectorCamera() {
           ...recordingVideoTracks,
           ...audioTracks,
         ]);
-        const supportedTypes = [
-          'video/webm;codecs=vp9,opus',
-          'video/webm;codecs=vp8,opus',
-          'video/webm',
-          'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
-          'video/mp4',
-        ];
-        const mimeType = supportedTypes.find((type) => MediaRecorder.isTypeSupported(type));
+        const mimeType = pickMimeType();
         const recorder = new MediaRecorder(recordingStream, {
           ...(mimeType ? { mimeType } : {}),
-          videoBitsPerSecond: 2_500_000,
+          videoBitsPerSecond: 10_000_000,
           audioBitsPerSecond: 128_000,
         });
         webChunksRef.current = [];

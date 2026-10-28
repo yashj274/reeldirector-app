@@ -6,6 +6,7 @@ import { decode } from 'base64-arraybuffer';
 import { getSupabase, hasSupabaseConfig } from '@/src/supabase';
 import { getLanguage } from '@/src/i18n';
 import { logBeta } from '@/src/betaLog';
+import { toEditProject } from '@/src/editor/project';
 
 const configuredBackend = (Constants.expoConfig?.extra?.backendUrl || '').replace(/\/+$/, '');
 function getBackendBase() {
@@ -91,6 +92,7 @@ function withoutTemporaryUrls(project: any) {
     delete clip.video_url;
     delete clip.frame_url;
   }
+  for (const track of copy.edit_json?.tracks || []) for (const item of track.items || []) delete item.signed_url;
   return copy;
 }
 
@@ -501,8 +503,8 @@ async function request(path: string, opts: RequestInit = {}): Promise<any> {
   if (!res.ok) {
     const msg = (data && (data.detail || data.message)) || `HTTP ${res.status}`;
     const message = typeof msg === 'string' ? msg : JSON.stringify(msg);
-    if (res.status === 429 || res.status >= 500) throw friendlyServiceError(message || `HTTP ${res.status}`);
-    throw new Error(message);
+    const error = res.status === 429 || res.status >= 500 ? friendlyServiceError(message || `HTTP ${res.status}`) : new Error(message);
+    throw Object.assign(error, { status: res.status });
   }
   return data;
 }
@@ -556,6 +558,9 @@ async function readProject(id: string) {
   if (project.export?.storage_path) assets.push({ path: project.export.storage_path, apply: (url) => { project.export.url = url; } });
   if (project.soundtrack?.storage_path) assets.push({ path: project.soundtrack.storage_path, apply: (url) => { project.soundtrack.signed_url = url; } });
   if (project.voiceover?.storage_path) assets.push({ path: project.voiceover.storage_path, apply: (url) => { project.voiceover.signed_url = url; } });
+  for (const track of (project.edit_json?.tracks || []).filter((value: any) => value.kind === 'overlay')) {
+    for (const item of track.items || []) if (item.src) assets.push({ path: item.src, apply: (url) => { item.signed_url = url; } });
+  }
   for (const clip of project.clips || []) {
     if (clip.video_storage_path) assets.push({ path: clip.video_storage_path, apply: (url) => { clip.video_url = url; } });
     if (clip.frame_storage_path) assets.push({ path: clip.frame_storage_path, apply: (url) => { clip.frame_url = url; } });
@@ -789,7 +794,10 @@ export const api = {
   getProject: readProject,
   saveEditSettings: async (id: string, settings: Record<string, any>) => {
     const project = await readProject(id);
-    const updated = { ...project, edit_settings: settings, updated_at: new Date().toISOString() };
+    const updated = {
+      ...project, edit_settings: settings, edit_json: toEditProject(project, settings),
+      updated_at: new Date().toISOString(),
+    };
     await updateProjectData(updated);
     void rememberCreatorStyleChoice(updated);
     return { ok: true };
@@ -811,6 +819,7 @@ export const api = {
       project.soundtrack?.storage_path,
       project.voiceover?.storage_path,
       project.export?.storage_path,
+      ...(project.edit_json?.tracks || []).flatMap((track: any) => (track.items || []).map((item: any) => item.src)),
     ].filter((path: unknown): path is string => typeof path === 'string' && path.startsWith(projectPrefix));
     const { error } = await getSupabase().from('projects').delete()
       .eq('id', id).eq('user_id', user.id);
@@ -992,6 +1001,46 @@ export const api = {
   saveVoiceover: async (project_id: string, file: { uri: string; name: string; mimeType?: string; file?: Blob }) =>
     saveAudioTrack(project_id, 'voiceover', file),
   removeVoiceover: async (project_id: string) => removeAudioTrack(project_id, 'voiceover'),
+  addBrollImage: async (project_id: string, file: { uri: string; name: string; mimeType?: string; file?: Blob; size?: number }, start: number, duration: number) => {
+    if (file.size && file.size > 20 * 1024 * 1024) throw new Error('Choose a B-roll image smaller than 20 MB.');
+    const user = await currentUser();
+    const project = await readProject(project_id);
+    const mimeType = file.mimeType || 'image/jpeg';
+    if (!mimeType.startsWith('image/')) throw new Error('Choose an image for the B-roll overlay.');
+    const extension = (file.name.match(/\.([a-zA-Z0-9]{1,8})$/)?.[1] || (mimeType === 'image/png' ? 'png' : 'jpg')).toLowerCase();
+    const path = `${user.id}/${project_id}/broll/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${extension}`;
+    const { File } = await import('expo-file-system');
+    const bytes = file.file ? await file.file.arrayBuffer() : await new File(file.uri).arrayBuffer();
+    const { error } = await getSupabase().storage.from('project-media').upload(path, bytes, { contentType: mimeType, upsert: false });
+    if (error) throw error;
+    const edit = project.edit_json || toEditProject(project, project.edit_settings || {});
+    const overlay = edit.tracks.find((track: any) => track.kind === 'overlay');
+    const item: { id: string; type: 'image'; src: string; start: number; duration: number; filter?: undefined;
+      frame: { x: number; y: number; width: number; height: number; radius: number }; signed_url?: string | null } = {
+      id: `broll-${Date.now()}`, type: 'image', src: path, start: Math.max(0, start), duration: Math.max(0.5, duration), filter: undefined,
+      frame: { x: 70, y: 72, width: 38, height: 30, radius: 18 }, signed_url: null,
+    };
+    overlay.items.push(item);
+    try {
+      await updateProjectData({ ...project, edit_json: edit, updated_at: new Date().toISOString() });
+    } catch (saveError) {
+      if (!(saveError as any)?.localSaved) await deleteStoredFrames([path]);
+      throw saveError;
+    }
+    const signed = await signMediaPaths([path]);
+    item.signed_url = signed.get(path) || null;
+    return item;
+  },
+  removeBroll: async (project_id: string, itemId: string) => {
+    const project = await readProject(project_id);
+    const edit = project.edit_json;
+    const overlay = edit?.tracks?.find((track: any) => track.kind === 'overlay');
+    if (!overlay) return;
+    const removed = overlay.items.find((item: any) => item.id === itemId);
+    overlay.items = overlay.items.filter((item: any) => item.id !== itemId);
+    await updateProjectData({ ...project, edit_json: edit, updated_at: new Date().toISOString() });
+    if (removed?.src) await deleteStoredFrames([removed.src]);
+  },
   updateStoryboard: async (id: string, shots: any[]) => {
     const project = await readProject(id);
     for (let i = 0; i < shots.length; i++) {
@@ -1033,14 +1082,16 @@ export const api = {
       caption_edits?: Record<string, any>[];
       title_text?: string; title_font?: string; title_position?: string;
       title_color?: string; title_size?: string; music_volume?: number; voiceover_volume?: number; original_volume?: number;
-      captions_enabled?: boolean;
+      captions_enabled?: boolean; title_animation?: string;
+      render_provider?: 'creatomate' | 'ffmpeg';
     } = {},
     onProgress?: (status: string) => void,
   ) => {
     const project = await readProject(id);
     const exportOptions: Record<string, any> = {
       ...(project.edit_settings || {}), ...opts,
-      render_provider: 'ffmpeg', show_shot_titles: false,
+      render_provider: opts.render_provider || project.edit_settings?.render_provider || 'ffmpeg', show_shot_titles: false,
+      async_export: true,
     };
     if (typeof exportOptions.music_volume === 'number' && exportOptions.music_volume > 1) {
       exportOptions.music_volume /= 100;
@@ -1058,10 +1109,38 @@ export const api = {
       const result = await request(`/projects/${id}/export`, {
         method: 'POST', body: JSON.stringify(exportOptions),
       });
-      logBeta('render', 'completed');
-      logBeta('export', 'completed');
-      onProgress?.('completed');
-      return result;
+      if (!result?.job_id) {
+        logBeta('render', 'completed');
+        logBeta('export', 'completed');
+        onProgress?.('completed');
+        return result;
+      }
+      const startedAt = Date.now();
+      let waitMs = 1500;
+      while (Date.now() - startedAt < 15 * 60_000) {
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        const endpoint = result.provider === 'ffmpeg' ? 'render-jobs' : 'creatomate-renders';
+        let status;
+        try {
+          status = await request(`/projects/${id}/${endpoint}/${result.job_id}`);
+        } catch (error) {
+          const code = (error as any)?.status;
+          if (code === 401 || code === 403 || code === 404) throw error;
+          onProgress?.('Reconnecting to your export…');
+          waitMs = 5000;
+          continue;
+        }
+        onProgress?.(status.phase || (status.status === 'FINALIZING' ? 'Saving your finished video…' : 'Rendering your reel…'));
+        if (status.status === 'COMPLETED') {
+          logBeta('render', 'completed');
+          logBeta('export', 'completed');
+          onProgress?.('completed');
+          return status.export;
+        }
+        if (status.status === 'FAILED') throw new Error(status.error || 'Could not finish this reel. Your clips are safe; please retry Export.');
+        waitMs = Math.min(5000, Math.round(waitMs * 1.35));
+      }
+      throw new Error('Your export is still running in the background. Your clips are safe; return to Export to check it again.');
     } catch (error) {
       logBeta('render', 'failed');
       logBeta('export', 'failed');

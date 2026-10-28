@@ -10,6 +10,8 @@ import uuid
 import re
 import shutil
 import subprocess
+import signal
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -19,8 +21,12 @@ from urllib.parse import urlparse
 
 import requests
 import imageio_ffmpeg
+import render_jobs
+import render_text
+import render_filters
 from supabase import AsyncClient, create_async_client
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, Query
+from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -141,6 +147,7 @@ class ExportIn(BaseModel):
     fps: int = 30
     editing_style: Optional[str] = None  # cinematic, luxury, minimal, action, editorial, warm, fast_pace
     render_provider: str = "ffmpeg"  # ffmpeg or creatomate
+    async_export: bool = False  # Older installed clients expect the finished export in this response.
     show_shot_titles: bool = False
     fit_mode: str = "fill"
     clip_order: List[int] = []
@@ -152,6 +159,7 @@ class ExportIn(BaseModel):
     title_position: str = "bottom"
     title_color: str = "white"
     title_size: str = "medium"
+    title_animation: str = "fade"
     music_volume: float = 0.25
     original_volume: float = 0.8
     voiceover_volume: float = 1.0
@@ -352,7 +360,7 @@ async def fetch_project(pid: str, user_id: str) -> Optional[Dict[str, Any]]:
     result = await get_supabase().table("projects").select("data").eq(
         "id", pid
     ).eq("user_id", user_id).maybe_single().execute()
-    return result.data["data"] if result.data else None
+    return result.data["data"] if result and result.data else None
 
 async def list_user_projects(user_id: str) -> List[Dict[str, Any]]:
     result = await get_supabase().table("projects").select("data").eq(
@@ -379,33 +387,61 @@ async def download_media(storage_path: str) -> bytes:
         return data.content
     raise RuntimeError("Supabase Storage returned an invalid file")
 
+
+def is_project_media_path(path: Any, prefix: str) -> bool:
+    return isinstance(path, str) and path.startswith(prefix) and not re.search(
+        r"%2e|%2f|%5c|[\\\x00]", path, re.I
+    ) and all(part not in {"", ".", ".."} for part in path.split("/"))
+
+
+def broll_items(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    tracks = (doc.get("edit_json") or {}).get("tracks", [])
+    return [item for track in tracks if track.get("kind") == "overlay" for item in track.get("items", [])]
+
+
+def validate_broll(doc: Dict[str, Any], expected_prefix: str) -> None:
+    items = broll_items(doc)
+    if len(items) > 20:
+        raise HTTPException(400, "Use at most 20 B-roll images per reel.")
+    for item in items:
+        path = str(item.get("src") or "")
+        if item.get("type") != "image" or not is_project_media_path(path, expected_prefix):
+            raise HTTPException(400, "Choose a B-roll image stored in this project.")
+        frame = item.get("frame") or {}
+        values = [(item.get("start", 0), 0, 600), (item.get("duration", 3), 0.1, 600),
+                  (frame.get("x", 70), 0, 100), (frame.get("y", 72), 0, 100),
+                  (frame.get("width", 38), 1, 100), (frame.get("height", 30), 1, 100),
+                  (frame.get("radius", 18), 0, 200)]
+        try:
+            if any(not math.isfinite(float(value)) or not lower <= float(value) <= upper for value, lower, upper in values):
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise HTTPException(400, "A B-roll image has invalid timing or positioning.")
+
+
+async def download_media_file(storage_path: str, destination: Path, max_bytes: int = 512 * 1024 ** 2):
+    url = await signed_media_url(storage_path)
+
+    def download():
+        with requests.get(url, stream=True, timeout=(10, 90)) as response:
+            response.raise_for_status()
+            total = 0
+            with destination.open("wb") as output:
+                for chunk in response.iter_content(1024 * 1024):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise HTTPException(400, "A media file is too large to export. Use a smaller file.")
+                    output.write(chunk)
+        if not total:
+            raise RuntimeError("A saved media file is empty")
+    await asyncio.to_thread(download)
+
+
 def _title_font_path(font_name: str) -> Path:
-    font_candidates = {
-        "sans": [
-            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-            Path("/System/Library/Fonts/SFNS.ttf"),
-        ],
-        "serif": [
-            Path("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"),
-            Path("/System/Library/Fonts/Supplemental/Georgia.ttf"),
-        ],
-        "mono": [ROOT_DIR / "assets/fonts/SpaceMono-Regular.ttf"],
-        "bold": [
-            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-            Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
-        ],
-        "condensed": [
-            Path("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"),
-            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-        ],
-        "serif_bold": [
-            Path("/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"),
-            Path("/System/Library/Fonts/Supplemental/Georgia Bold.ttf"),
-        ],
-    }
-    candidates = font_candidates.get(font_name, font_candidates["sans"])
-    return next((path for path in candidates if path.is_file()),
-                ROOT_DIR / "assets/fonts/SpaceMono-Regular.ttf")
+    path = render_text.FONT_DIR / render_text.font_info(font_name)[1]
+    if not path.is_file():
+        raise RuntimeError(f"The bundled editor font is missing: {path.name}")
+    return path
 
 
 def _escape_filter_path(path: Path) -> str:
@@ -424,21 +460,7 @@ def _ffmpeg_executable() -> str:
     return shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 
 
-VIDEO_STYLE_FILTERS = {
-    "cinematic": "eq=contrast=1.08:saturation=0.95:brightness=-0.02",
-    "luxury": "eq=contrast=1.04:saturation=0.90,colorbalance=rs=0.04:gs=0.01:bs=-0.02",
-    "minimal": "eq=contrast=1.01:saturation=0.85",
-    "action": "eq=contrast=1.15:saturation=1.08",
-    "editorial": "eq=contrast=1.10:saturation=1.05",
-    "warm": "colorbalance=rs=0.08:gs=0.02:bs=-0.06",
-    "fast_pace": "eq=contrast=1.12:saturation=1.08",
-    "original": "",
-    "mono": "hue=s=0,eq=contrast=1.04",
-    "vivid": "eq=contrast=1.12:saturation=1.22",
-    "cool": "colorbalance=rs=-0.04:gs=0.01:bs=0.08",
-    "vintage": "eq=contrast=0.92:saturation=0.78:brightness=0.025",
-    "soft": "eq=contrast=0.92:saturation=0.92",
-}
+VIDEO_STYLE_FILTERS = render_filters.FILTERS
 
 
 def _run_video_render(concat_file: Path, output_file: Path, width: int, height: int,
@@ -447,92 +469,82 @@ def _run_video_render(concat_file: Path, output_file: Path, width: int, height: 
                       title_position: str = "bottom", title_color: str = "white",
                       title_size: str = "medium", music_volume: float = 0.25,
                       original_volume: float = 0.8, voiceover_file: Optional[Path] = None,
-                      voiceover_volume: float = 1.0) -> None:
+                      voiceover_volume: float = 1.0, title_animation: str = "none",
+                      overlays: Optional[List[Dict[str, Any]]] = None) -> None:
     ffmpeg = _ffmpeg_executable()
-    filters = [
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
-    ]
-    if editing_style == "fast_pace":
-        filters.append("setpts=0.8*PTS")
-    filters.append(f"fps={fps}")
+    command = [ffmpeg, "-y", "-filter_threads", "1", "-filter_complex_threads", "1",
+               "-f", "concat", "-safe", "0", "-i", str(concat_file)]
+    video_filters = [f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+                     f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2", "setsar=1", f"fps={fps}"]
     if VIDEO_STYLE_FILTERS.get(editing_style):
-        filters.append(VIDEO_STYLE_FILTERS[editing_style])
-    filters.append("format=yuv420p")
-    if title_text.strip():
-        title_file = concat_file.parent / "title-overlay.txt"
-        title_file.write_text(title_text.strip()[:80], encoding="utf-8")
-        font_file = _escape_filter_path(_title_font_path(title_font))
-        text_file = _escape_filter_path(title_file)
-        size_ratio = {"small": 0.042, "medium": 0.058, "large": 0.074}.get(title_size, 0.058)
-        font_size = max(28, min(110, round(min(width, height) * size_ratio)))
-        y_position = {
-            "top": "h*0.12",
-            "center": "(h-text_h)/2",
-            "bottom": "h-text_h-h*0.14",
-        }.get(title_position, "h-text_h-h*0.14")
-        color = {"white": "white", "gold": "0xF5C869", "pink": "0xE0115F", "black": "black"}.get(title_color, "white")
-        border_color = "white@0.85" if title_color == "black" else "black@0.78"
-        box_color = "white@0.75" if title_color == "black" else "black@0.28"
-        filters.append(
-            f"drawtext=fontfile='{font_file}':textfile='{text_file}':"
-            f"fontsize={font_size}:fontcolor={color}:borderw=2:bordercolor={border_color}:"
-            f"box=1:boxcolor={box_color}:boxborderw=14:x=(w-text_w)/2:y={y_position}:"
-            "enable='between(t,0,3.5)'"
+        video_filters.append(VIDEO_STYLE_FILTERS[editing_style])
+    graph = [f"[0:v]{','.join(video_filters)}[base]"]
+    video_label = "base"
+    next_input = 1
+    # The preview displays the first active image on this track above later ones.
+    for index, item in enumerate(reversed(overlays or [])):
+        command.extend(["-loop", "1", "-framerate", str(fps), "-i", str(item["file"])])
+        frame = item.get("frame") or {}
+        image_w = max(2, round(width * float(frame.get("width", 38)) / 100))
+        image_h = max(2, round(height * float(frame.get("height", 30)) / 100))
+        x = max(0, width * (float(frame.get("x", 70)) / 100) - image_w / 2)
+        y = max(0, height * (float(frame.get("y", 72)) / 100) - image_h / 2)
+        radius = min(image_w / 2, image_h / 2, float(frame.get("radius", 18)) * width / 1080)
+        mask = (f"if(lte(pow(max(max({radius:.2f}-X,X-(W-1-{radius:.2f})),0),2)"
+                f"+pow(max(max({radius:.2f}-Y,Y-(H-1-{radius:.2f})),0),2),{radius**2:.2f}),255,0)")
+        graph.append(
+            f"[{next_input}:v]scale={image_w}:{image_h}:force_original_aspect_ratio=increase,"
+            f"crop={image_w}:{image_h},setsar=1,format=rgba,"
+            f"drawbox=x=0:y=0:w=iw:h=ih:color=white:t={max(1, round(width*.004))},"
+            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*({mask})/255'[image{index}]"
         )
-    video_filter = ",".join(filters)
-    command = [ffmpeg, "-y", "-filter_threads", "1", "-filter_complex_threads", "1", "-f", "concat", "-safe", "0", "-i", str(concat_file)]
-    external_audio_labels = []
-    audio_filters = []
-    source_audio_filter = f"{'atempo=1.25,' if editing_style == 'fast_pace' else ''}volume={max(0.0, min(1.0, original_volume))}"
+        start, end = float(item.get("start", 0)), float(item.get("start", 0)) + float(item.get("duration", 3))
+        graph.append(f"[{video_label}][image{index}]overlay=x={x:.2f}:y={y:.2f}:"
+                     f"enable='between(t,{start:.3f},{end:.3f})':shortest=1[overlay{index}]")
+        video_label = f"overlay{index}"
+        next_input += 1
+    if title_text.strip():
+        title_file = concat_file.parent / "title.ass"
+        render_text.write_title(title_file, width, height, title_text.strip()[:80], title_font,
+                                title_size, title_color, title_position, title_animation)
+        graph.append(f"[{video_label}]ass=filename='{_escape_filter_path(title_file)}':"
+                     f"fontsdir='{_escape_filter_path(render_text.FONT_DIR)}'[title]")
+        video_label = "title"
+    graph.append(f"[{video_label}]format=yuv420p[vout]")
     mix_music = soundtrack_file is not None and music_volume > 0
     mix_voiceover = voiceover_file is not None and voiceover_volume > 0
-    probe_audio = mix_music or mix_voiceover or editing_style == "fast_pace" or original_volume != 1.0
-    has_source_audio = _has_audio_stream(concat_file, ffmpeg) if probe_audio else True
-    next_input = 1
+    has_source_audio = _has_audio_stream(concat_file, ffmpeg)
+    audio_label = None
     if mix_music or mix_voiceover:
         if has_source_audio:
-            audio_filters.append(f"[0:a]{source_audio_filter}[original]")
+            graph.append(f"[0:a]volume={original_volume:.3f}[original]")
         else:
-            command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"])
-            audio_filters.append(f"[{next_input}:a]anull[original]")
+            command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
+            graph.append(f"[{next_input}:a]anull[original]")
             next_input += 1
-        external_audio_labels.append("[original]")
-    if mix_music:
-        command.extend(["-stream_loop", "-1", "-i", str(soundtrack_file)])
-        audio_filters.append(f"[{next_input}:a]volume={max(0.0, min(1.0, music_volume))}[music]")
-        external_audio_labels.append("[music]")
-        next_input += 1
-    if mix_voiceover:
-        command.extend(["-i", str(voiceover_file)])
-        voiceover_tempo = "atempo=1.25," if editing_style == "fast_pace" else ""
-        audio_filters.append(f"[{next_input}:a]{voiceover_tempo}volume={max(0.0, min(1.0, voiceover_volume))}[voiceover]")
-        external_audio_labels.append("[voiceover]")
-    command.extend(["-vf", video_filter, "-map", "0:v:0"])
-    if mix_music or mix_voiceover:
-        if len(external_audio_labels) > 1:
-            audio_filters.append(
-                f"{''.join(external_audio_labels)}amix=inputs={len(external_audio_labels)}:"
-                "duration=first:dropout_transition=2[aout]"
-            )
-            audio_label = "[aout]"
-        else:
-            audio_label = external_audio_labels[0]
-        command.extend([
-            "-filter_complex", ";".join(audio_filters), "-map", audio_label,
-        ])
+        audio_labels = ["[original]"]
+        if mix_music:
+            command.extend(["-stream_loop", "-1", "-i", str(soundtrack_file)])
+            graph.append(f"[{next_input}:a]volume={music_volume:.3f}[music]")
+            audio_labels.append("[music]")
+            next_input += 1
+        if mix_voiceover:
+            command.extend(["-i", str(voiceover_file)])
+            graph.append(f"[{next_input}:a]volume={voiceover_volume:.3f}[voiceover]")
+            audio_labels.append("[voiceover]")
+        graph.append(f"{''.join(audio_labels)}amix=inputs={len(audio_labels)}:duration=first:"
+                     "dropout_transition=0:normalize=0,alimiter=limit=0.95:level=0[aout]")
+        audio_label = "[aout]"
     elif has_source_audio:
-        command.extend(["-map", "0:a?"])
-        if editing_style == "fast_pace" or original_volume != 1.0:
-            command.extend(["-filter:a", source_audio_filter])
-    command.extend([
-        "-c:v", "libx264", "-preset", "ultrafast", "-threads:v", "1", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", str(output_file),
-    ])
-    subprocess.run(
-        command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        timeout=600, cwd=concat_file.parent,
-    )
+        graph.append(f"[0:a]volume={original_volume:.3f}[aout]")
+        audio_label = "[aout]"
+    command.extend(["-filter_complex", ";".join(graph), "-map", "[vout]"])
+    if audio_label:
+        command.extend(["-map", audio_label])
+    command.extend(["-c:v", "libx264", "-preset", "ultrafast", "-threads:v", "1", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", str(output_file)])
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                   timeout=600, cwd=concat_file.parent)
 
 
 def _run_video_remux(concat_file: Path, output_file: Path) -> None:
@@ -562,9 +574,9 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
     command = [ffmpeg, "-y", "-filter_threads", "1", "-filter_complex_threads", "1"]
     if trim_start_seconds > 0:
         command.extend(["-ss", f"{trim_start_seconds:.3f}"])
-    command.extend(["-i", str(input_file)])
     if trim_end_seconds is not None:
         command.extend(["-t", f"{max(0.1, trim_end_seconds - trim_start_seconds):.3f}"])
+    command.extend(["-i", str(input_file)])
     audio_map = "0:a:0"
     if not has_audio:
         command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
@@ -574,27 +586,26 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
     else:
         framing = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
     rate = max(0.5, min(2.0, float(playback_rate or 1)))
-    video_filter = f"{framing},setpts=PTS/{rate:.3f},setsar=1,fps={fps},format=yuv420p"
-    clip_filters = {
-        "original": "",
-        "warm": "colorbalance=rs=0.08:gs=0.02:bs=-0.06",
-        "cool": "colorbalance=rs=-0.04:gs=0.01:bs=0.08",
-        "mono": "hue=s=0,eq=contrast=1.04",
-        "vivid": "eq=contrast=1.12:saturation=1.22",
-        "vintage": "eq=contrast=0.92:saturation=0.78:brightness=0.025",
-        "soft": "eq=contrast=0.92:saturation=0.92",
-    }
+    video_filter = f"{framing},setpts=(PTS-STARTPTS)/{rate:.3f},setsar=1,fps={fps},format=yuv420p"
+    if trim_end_seconds is not None:
+        video_filter = video_filter.replace(",format=yuv420p", ",tpad=stop_mode=clone:stop_duration=1,format=yuv420p")
+    clip_filters = render_filters.FILTERS
     preset = clip_filters.get(filter_preset, "")
     if preset:
         video_filter = video_filter.replace(",format=yuv420p", f",{preset},format=yuv420p")
+    style_filter = VIDEO_STYLE_FILTERS.get(editing_style or "")
+    if style_filter:
+        video_filter = video_filter.replace(",format=yuv420p", f",{style_filter},format=yuv420p")
     exposure = max(-0.5, min(0.5, float(brightness or 0)))
     if abs(exposure) >= 0.01:
-        video_filter = video_filter.replace(",format=yuv420p", f",eq=brightness={exposure:.3f},format=yuv420p")
+        video_filter = video_filter.replace(",format=yuv420p", f",format=rgb24,{render_filters.brightness(1 + exposure)},format=yuv420p")
     if captions_file and captions_file.is_file() and captions_file.read_text(encoding="utf-8").strip():
         font_file = _escape_filter_path(_title_font_path(caption_font))
-        text_file = _escape_filter_path(captions_file)
         size_ratio = {"small": 0.034, "medium": 0.046, "large": 0.062}.get(caption_size, 0.046)
-        font_size = max(18, min(80, round(min(width, height) * size_ratio)))
+        font_size = round(min(width, height) * size_ratio)
+        wrapped_file = captions_file.with_suffix(".wrapped.txt")
+        wrapped_file.write_text(render_text.wrap_text(captions_file.read_text(encoding="utf-8"), font_size, width * .92), encoding="utf-8")
+        text_file = _escape_filter_path(wrapped_file)
         x_ratio = max(0.0, min(100.0, caption_position_x)) / 100
         y_ratio = max(0.0, min(100.0, caption_position_y)) / 100
         caption_duration = max(0.0, caption_end_seconds) if caption_end_seconds is not None else max(0.0, (trim_end_seconds or 0) - trim_start_seconds)
@@ -606,14 +617,12 @@ def _normalize_video_clip(input_file: Path, output_file: Path, width: int, heigh
             f"enable='between(t,{max(0.0, caption_start_seconds):.3f},{caption_duration:.3f})'"
         )
         video_filter = video_filter.replace(",format=yuv420p", f",{caption_filter},format=yuv420p")
-    style_filter = VIDEO_STYLE_FILTERS.get(editing_style or "")
-    if style_filter:
-        video_filter = video_filter.replace(",format=yuv420p", f",{style_filter},format=yuv420p")
     command.extend([
         "-map", "0:v:0", "-map", audio_map, "-vf", video_filter,
-        "-af", f"atempo={rate:.3f},apad,volume={max(0.0, min(1.0, audio_volume)):.3f}", "-c:v", "libx264", "-preset", "ultrafast", "-threads:v", "1", "-crf", "23",
+        "-af", f"asetpts=PTS-STARTPTS,atempo={rate:.3f},apad,volume={max(0.0, min(1.0, audio_volume)):.3f}", "-c:v", "libx264", "-preset", "ultrafast", "-threads:v", "1", "-crf", "23",
         "-pix_fmt", "yuv420p", "-r", str(fps), "-c:a", "aac", "-ar", "48000",
         "-ac", "2", "-b:a", "128k", "-shortest", "-movflags", "+faststart",
+        *(["-t", f"{(trim_end_seconds - trim_start_seconds) / rate:.3f}"] if trim_end_seconds is not None else []),
         str(output_file),
     ])
     subprocess.run(
@@ -1297,7 +1306,8 @@ def fallback_storyboard(doc: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]
     the environment scan, instead of substituting a generic shot list.
     """
     purpose = str(doc.get("purpose") or doc.get("title") or "").strip()
-    auto_duration = doc.get("duration_mode", "auto") == "auto"
+    # Older projects have no duration_mode; their saved duration was a creator target.
+    auto_duration = doc.get("duration_mode") == "auto"
     if auto_duration:
         words = re.findall(r"\b[\w'-]+\b", purpose)
         story_beats = len(re.findall(r"\b(then|before|after|while|journey|story|from|through|finally|celebrate|process|steps|behind)\b", purpose, re.I))
@@ -1524,7 +1534,7 @@ Make it practical to film on a phone and tailored to {doc['platform']}. Match th
         response_data = extract_json(raw)
         if isinstance(response_data, dict):
             proposed_shots = response_data.get("shots")
-            if isinstance(proposed_shots, list) and len(proposed_shots) < 3:
+            if isinstance(proposed_shots, list) and len(proposed_shots) < 4:
                 repair_prompt = (
                     f"{prompt}\n\nThe last draft had only {len(proposed_shots)} shots, so it lacked a clear story arc. "
                     "Return at least three distinct, purposeful shots; shorten descriptions if needed."
@@ -1920,7 +1930,11 @@ async def signed_media_url(storage_path: str, expires_seconds: int = 7200) -> st
 async def start_creatomate_render(pid: str, doc: Dict[str, Any], clips: List[Dict[str, Any]],
                                   body: ExportIn, user_id: str, expected_prefix: str,
                                   width: int, height: int, editing_style: str,
-                                  soundtrack_path: Optional[str], soundtrack: Dict[str, Any]) -> Dict[str, Any]:
+                                  soundtrack_path: Optional[str], soundtrack: Dict[str, Any],
+                                  normalized_edits: Dict[int, Dict[str, Any]],
+                                  normalized_splits: Dict[int, List[float]],
+                                  normalized_captions: Dict[int, Dict[str, Any]],
+                                  voiceover_path: Optional[str]) -> Dict[str, Any]:
     if not CREATOMATE_API_KEY:
         raise HTTPException(503, "Creatomate is not configured yet. Add CREATOMATE_API_KEY to the backend environment.")
     active = doc.get("creatomate_render_job") or {}
@@ -1928,35 +1942,132 @@ async def start_creatomate_render(pid: str, doc: Dict[str, Any], clips: List[Dic
         raise HTTPException(409, "A Creatomate render is already running for this project.")
 
     elements: List[Dict[str, Any]] = []
+    storyboard = doc.get("storyboard") or []
+    font_families = {
+        "sans": "Inter", "inter": "Inter", "bold": "Montserrat", "montserrat": "Montserrat",
+        "mono": "Space Grotesk", "space-grotesk": "Space Grotesk", "condensed": "Bebas Neue", "bebas": "Bebas Neue",
+        "anton": "Anton", "archivo-black": "Archivo Black", "serif": "Playfair Display", "playfair": "Playfair Display",
+        "serif_bold": "Fraunces", "fraunces": "Fraunces", "dm-serif": "DM Serif Display", "caveat": "Caveat", "marker": "Permanent Marker",
+    }
+    filter_specs = {
+        "original": (None, None, None), "warm": ("sepia", 18, "rgba(255,150,40,0.06)"),
+        "cool": ("hue", 9, "rgba(40,110,255,0.08)"), "mono": ("grayscale", 100, None),
+        "vivid": ("contrast", 12, None), "vintage": ("sepia", 24, "rgba(90,55,20,0.06)"),
+        "soft": ("contrast", 8, "rgba(255,255,255,0.04)"), "film": ("sepia", 12, "rgba(40,25,10,0.04)"),
+        "cinematic": ("contrast", 8, "rgba(0,10,24,0.04)"), "luxury": ("contrast", 7, "rgba(90,55,20,0.05)"),
+        "minimal": ("contrast", 2, None), "action": ("contrast", 15, None), "editorial": ("contrast", 10, None),
+        "fast_pace": ("contrast", 12, None),
+    }
     cursor = 0.0
     for index, clip in enumerate(clips):
-        duration = max(0.1, float(clip.get("duration_seconds") or 5))
+        shot = int(clip.get("shot_index", index))
+        source_duration = max(0.1, float(clip.get("duration_seconds") or 5))
+        edit = normalized_edits.get(shot, {})
+        trim_start = float(edit.get("trim_start_seconds", 0))
+        trim_end = min(source_duration, float(edit.get("trim_end_seconds") or source_duration))
+        speed = float(edit.get("playback_rate") or 1)
+        cuts = [trim_start, *normalized_splits.get(shot, []), trim_end]
+        caption = normalized_captions.get(shot, {})
+        shot_text = str(storyboard[shot].get("on_screen_text") or "").strip() if shot < len(storyboard) else ""
+        chosen_filter = edit.get("filter_preset") if edit.get("filter_preset", "original") != "original" else editing_style
+        color_filter, color_filter_value, color_overlay = filter_specs.get(chosen_filter, (None, None, None))
         source = await signed_media_url(clip["video_storage_path"])
-        video = {"name": f"Shot-{index + 1}", "type": "video", "track": 2,
-                 "time": cursor, "duration": duration, "source": source, "fit": "cover"}
-        if index:
-            video["animations"] = [{"time": 0, "duration": 0.45, "transition": True,
-                                    "type": "fade", "enable": "second-only"}]
-        elements.append(video)
+        for part, (part_start, part_end) in enumerate(zip(cuts, cuts[1:])):
+            source_span = max(0.1, part_end - part_start)
+            duration = source_span / speed
+            video = {"name": f"Shot-{index + 1}-{part + 1}", "type": "video", "track": 3,
+                     "time": round(cursor, 3), "duration": round(duration, 3), "source": source,
+                     "trim_start": round(part_start, 3), "trim_duration": round(source_span, 3),
+                     "speed": f"{speed * 100:.1f}%", "volume": f"{body.original_volume * 100:.1f}%",
+                     "fit": "contain" if body.fit_mode == "fit" else "cover"}
+            if color_filter:
+                video["color_filter"] = color_filter
+                video["color_filter_value"] = color_filter_value
+            if color_overlay:
+                video["color_overlay"] = color_overlay
+            brightness = float(edit.get("brightness") or 0)
+            if abs(brightness) >= 0.01:
+                video["color_overlay"] = f"rgba({'255,255,255' if brightness > 0 else '0,0,0'},{min(0.45, abs(brightness)):.3f})"
+            elements.append(video)
+            if body.captions_enabled and shot_text:
+                cap_start = max(0, float(caption.get("start_seconds", 0)) - (part_start - trim_start) / speed)
+                cap_end = min(duration, float(caption.get("end_seconds", duration)) - (part_start - trim_start) / speed)
+                if cap_end > cap_start:
+                    caption_element = {
+                        "name": f"Caption-{index + 1}-{part + 1}", "type": "text", "track": 5,
+                        "time": round(cursor + cap_start, 3), "duration": round(cap_end - cap_start, 3),
+                        "text": shot_text[:180], "x": f"{float(caption.get('position_x', 50)):.2f}%",
+                        "y": f"{float(caption.get('position_y', 84)):.2f}%", "x_anchor": "50%", "y_anchor": "50%",
+                        "width": "92%", "height": "14%", "x_alignment": "50%", "y_alignment": "50%",
+                        "font_family": font_families.get(caption.get("font", "inter"), "Inter"), "font_weight": 700,
+                        "font_size": {"small": "3.4 vmin", "medium": "4.6 vmin", "large": "6.2 vmin"}.get(caption.get("size"), "4.6 vmin"),
+                        "fill_color": "#FFFFFF", "background_color": "rgba(0,0,0,0.62)",
+                        "background_x_padding": "8%", "background_y_padding": "8%",
+                    }
+                    elements.append(caption_element)
+            cursor += duration
         if body.show_shot_titles:
-            storyboard = doc.get("storyboard") or []
-            shot_title = (storyboard[clip.get("shot_index", index)].get("title")
-                          if clip.get("shot_index", index) < len(storyboard) else f"Shot {index + 1}")
+            shot_title = (storyboard[shot].get("title") if shot < len(storyboard) else f"Shot {index + 1}")
             elements.append({
-                "name": f"Shot-Title-{index + 1}", "type": "text", "track": 3,
-                "time": cursor, "duration": min(duration, 2.8), "text": str(shot_title)[:90],
+                "name": f"Shot-Title-{index + 1}", "type": "text", "track": 6,
+                "time": max(0, cursor - (trim_end - trim_start) / speed), "duration": min((trim_end - trim_start) / speed, 2.8), "text": str(shot_title)[:90],
                 "x": "7%", "y": "84%", "width": "86%", "height": "10%",
                 "font_family": "Montserrat", "font_weight": "700", "font_size": "5 vmin",
                 "fill_color": "#ffffff", "background_color": "rgba(0,0,0,0.55)",
                 "background_x_padding": "8%", "background_y_padding": "15%",
             })
-        cursor += duration
+    edit_json = doc.get("edit_json") or {}
+    overlay_track = next((track for track in edit_json.get("tracks", []) if track.get("kind") == "overlay"), {})
+    for item in overlay_track.get("items", []):
+        source_path = str(item.get("src") or "")
+        if not source_path.startswith(expected_prefix):
+            raise HTTPException(400, "A B-roll image is not stored in this project.")
+        start = max(0.0, float(item.get("start") or 0))
+        duration = min(max(0.1, float(item.get("duration") or 3)), max(0.1, cursor - start))
+        if start >= cursor:
+            continue
+        frame = item.get("frame") or {}
+        elements.append({
+            "name": f"B-Roll-{str(item.get('id') or 'image')[:32]}", "type": "image", "track": 4,
+            "time": round(start, 3), "duration": round(duration, 3),
+            "source": await signed_media_url(source_path), "fit": "cover",
+            "x": f"{float(frame.get('x', 70)):.2f}%", "y": f"{float(frame.get('y', 72)):.2f}%",
+            "x_anchor": "50%", "y_anchor": "50%", "width": f"{float(frame.get('width', 38)):.2f}%",
+            "height": f"{float(frame.get('height', 30)):.2f}%",
+            "border_radius": f"{max(0, float(frame.get('radius', 18))):.1f} px",
+            "stroke_color": "#ffffff", "stroke_width": "0.35 vmin",
+        })
     if soundtrack_path:
         music_url = await signed_media_url(soundtrack_path)
         elements.append({"name": "Soundtrack", "type": "audio", "track": 1,
                          "time": 0, "duration": cursor, "source": music_url,
-                         "loop": True, "volume": "30%", "audio_fade_in": 0.4,
+                         "loop": True, "volume": f"{body.music_volume * 100:.1f}%", "audio_fade_in": 0.4,
                          "audio_fade_out": min(1.5, cursor / 4)})
+    if voiceover_path:
+        voice_url = await signed_media_url(voiceover_path)
+        elements.append({"name": "Voiceover", "type": "audio", "track": 2, "time": 0,
+                         "duration": cursor, "source": voice_url,
+                         "volume": f"{body.voiceover_volume * 100:.1f}%"})
+    if body.title_text.strip():
+        title_color = {"white": "#ffffff", "gold": "#F5C869", "pink": "#E0115F", "black": "#101114"}.get(body.title_color, "#ffffff")
+        title_y = {"top": "15%", "center": "50%", "bottom": "84%"}.get(body.title_position, "84%")
+        title = {"name": "Main-Title", "type": "text", "track": 6, "time": 0,
+                 "duration": min(cursor, 3.5), "text": body.title_text[:80], "x": "50%", "y": title_y,
+                 "x_anchor": "50%", "y_anchor": "50%", "width": "90%", "height": "20%",
+                 "x_alignment": "50%", "y_alignment": "50%", "font_family": font_families.get(body.title_font, "Inter"),
+                 "font_weight": 400 if body.title_font in {"playfair", "fraunces", "dm-serif", "caveat"} else 700,
+                 "font_size": {"small": "4.2 vmin", "medium": "5.8 vmin", "large": "7.4 vmin"}.get(body.title_size, "5.8 vmin"),
+                 "fill_color": title_color, "background_color": "rgba(0,0,0,0.28)" if body.title_color != "black" else "rgba(255,255,255,0.75)",
+                 "background_x_padding": "8%", "background_y_padding": "12%"}
+        title_animations = {
+            "fade": {"type": "fade"}, "pop": {"type": "scale", "start_scale": "60%", "easing": "back-out"},
+            "slide-up": {"type": "text-slide", "direction": "up", "scope": "element"},
+            "typewriter": {"type": "text-typewriter"},
+            "word-by-word": {"type": "text-appear", "split": "word", "scope": "split-clip"},
+        }
+        if body.title_animation in title_animations:
+            title["animations"] = [{"time": 0, "duration": min(0.45, cursor), **title_animations[body.title_animation]}]
+        elements.append(title)
 
     script = {"output_format": "mp4", "width": width, "height": height,
               "frame_rate": body.fps, "duration": cursor, "elements": elements}
@@ -1983,6 +2094,7 @@ async def start_creatomate_render(pid: str, doc: Dict[str, Any], clips: List[Dic
         "show_shot_titles": body.show_shot_titles,
         "duration_seconds": cursor,
         "music_title": soundtrack.get("title") if soundtrack_path else None,
+        "captions": bool(body.captions_enabled), "title_animation": body.title_animation,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     doc["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -2237,9 +2349,39 @@ async def analyze_project_music_beats(pid: str, user=Depends(current_user)):
         raise HTTPException(422, str(error) or "Could not analyze this music track.")
 
 
-@api.post("/projects/{pid}/export")
+@api.post("/projects/{pid}/export", status_code=202)
 async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
-    doc = await fetch_project(pid, user["id"])
+    result = await _export_project(pid, body, user)
+    if body.async_export or result.get("provider") != "ffmpeg":
+        return result
+    # Keep old clients compatible while the actual rendering still runs in the worker.
+    for _ in range(900):
+        status = await render_job_status(pid, result["job_id"], user)
+        if status["status"] == "COMPLETED":
+            return JSONResponse(status["export"])
+        if status["status"] == "FAILED":
+            raise HTTPException(502, status.get("error") or "Could not finish this reel. Please retry Export.")
+        await asyncio.sleep(2)
+    raise HTTPException(504, "Your export is still running. Return to Export to check it again.")
+
+
+@api.get("/projects/{pid}/render-jobs/{job_id}")
+async def render_job_status(pid: str, job_id: str, user=Depends(current_user)):
+    result = await get_supabase().table("render_jobs").select(
+        "id,status,progress,phase,error,result"
+    ).eq("id", job_id).eq("project_id", pid).eq("user_id", user["id"]).maybe_single().execute()
+    if result is None or not result.data:
+        raise HTTPException(404, "Export job not found")
+    response = render_jobs.public_job(result.data)
+    if result.data["status"] == "completed":
+        export = dict(result.data["result"])
+        export["url"] = await signed_media_url(export["storage_path"], 3600)
+        response["export"] = export
+    return response
+
+
+async def _export_project(pid: str, body: ExportIn, user: Dict[str, Any], job: Optional[Dict[str, Any]] = None):
+    doc = job["payload"]["project"] if job else await fetch_project(pid, user["id"])
     if not doc:
         raise HTTPException(404, "Project not found")
 
@@ -2272,7 +2414,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
         for clip in clips
     )
     for clip in clips:
-        if not clip["video_storage_path"].startswith(expected_prefix):
+        if not is_project_media_path(clip["video_storage_path"], expected_prefix):
             raise HTTPException(400, "A clip is not stored in this project.")
 
     ratio_dimensions = {
@@ -2298,7 +2440,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
     if requested_style not in supported_styles:
         raise HTTPException(400, "Choose a supported visual style for the export.")
 
-    supported_clip_filters = {"original", "warm", "cool", "mono", "vivid", "vintage", "soft"}
+    supported_clip_filters = {"original", "warm", "cool", "mono", "vivid", "vintage", "soft", "film"}
     normalized_edits: Dict[int, Dict[str, Any]] = {}
     normalized_splits: Dict[int, List[float]] = {}
     normalized_captions: Dict[int, Dict[str, Any]] = {}
@@ -2355,7 +2497,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
             raise HTTPException(400, f"Shot {shot_index + 1} caption position is outside the video frame.")
         if caption_size not in {"small", "medium", "large"}:
             raise HTTPException(400, "Choose a supported caption size.")
-        if caption_font not in {"sans", "serif", "mono", "bold", "condensed", "serif_bold"}:
+        if caption_font not in {"sans", "serif", "mono", "bold", "condensed", "serif_bold", "inter", "montserrat", "space-grotesk", "bebas", "anton", "archivo-black", "fraunces", "playfair", "dm-serif", "caveat", "marker"}:
             raise HTTPException(400, "Choose a supported caption font.")
         normalized_captions[shot_index] = {
             "start_seconds": caption_start,
@@ -2366,8 +2508,10 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
             "font": caption_font,
         }
 
-    if body.title_font not in {"sans", "serif", "mono", "bold", "condensed", "serif_bold"}:
+    if body.title_font not in {"sans", "serif", "mono", "bold", "condensed", "serif_bold", "inter", "montserrat", "space-grotesk", "bebas", "anton", "archivo-black", "fraunces", "playfair", "dm-serif", "caveat", "marker"}:
         raise HTTPException(400, "Choose a supported title font.")
+    if body.title_animation not in {"none", "fade", "pop", "slide-up", "typewriter", "word-by-word"}:
+        raise HTTPException(400, "Choose a supported text animation.")
     if body.title_position not in {"top", "center", "bottom"}:
         raise HTTPException(400, "Choose a valid title position.")
     if body.title_color not in {"white", "gold", "pink", "black"}:
@@ -2379,17 +2523,8 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
         raise HTTPException(400, "Audio levels must be between 0 and 100 percent.")
     title_text = re.sub(r"\s+", " ", body.title_text or "").strip()[:80]
 
-    # Generate a short description. The finished media itself is rendered from
-    # the actual recorded clips below; no demo video is substituted.
     style = doc.get("style", "cinematic")
-    summary_prompt = f"""Write a 2-sentence exciting summary of a just-finished {style} short reel titled '{doc['title']}' for a creator. Return plain text only."""
-    try:
-        blurb = (await chat_once(
-            "You are a hype copywriter for a viral reel app. Keep it under 40 words.",
-            summary_prompt,
-        )).strip()
-    except Exception:
-        blurb = f"Your {style} reel '{doc['title']}' is ready to go viral."
+    blurb = f"Your reel '{doc['title']}' is ready to share."
 
     thumb = TEMPLATES[0]["image"]
     for t in TEMPLATES:
@@ -2406,29 +2541,34 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
     width -= width % 2
     height -= height % 2
 
-    old_export_path = (doc.get("export") or {}).get("storage_path")
     soundtrack = doc.get("soundtrack") or {}
     soundtrack_path = soundtrack.get("storage_path")
-    if soundtrack_path and not soundtrack_path.startswith(expected_prefix):
+    if soundtrack_path and not is_project_media_path(soundtrack_path, expected_prefix):
         raise HTTPException(400, "The soundtrack is not stored in this project.")
     voiceover = doc.get("voiceover") or {}
     voiceover_path = voiceover.get("storage_path")
-    if voiceover_path and not voiceover_path.startswith(expected_prefix):
+    if voiceover_path and not is_project_media_path(voiceover_path, expected_prefix):
         raise HTTPException(400, "The voiceover is not stored in this project.")
-    remux_after_normalizing = (
-        not title_text and not soundtrack_path and not voiceover_path
-        and requested_style != "fast_pace"
-    )
+    remux_after_normalizing = not title_text and not soundtrack_path and not voiceover_path and not broll_items(doc)
 
+    validate_broll(doc, expected_prefix)
     if body.render_provider == "creatomate":
-        if any(normalized_splits.values()) or any(edit["playback_rate"] != 1 for edit in normalized_edits.values()):
-            raise HTTPException(400, "Split clips and speed changes require the built-in renderer.")
-        if voiceover_path:
-            raise HTTPException(400, "Voiceover mixing is currently available with the built-in renderer.")
         return await start_creatomate_render(
             pid, doc, clips, body, user["id"], expected_prefix, width, height,
-            requested_style, soundtrack_path, soundtrack,
+            requested_style, soundtrack_path, soundtrack, normalized_edits,
+            normalized_splits, normalized_captions, voiceover_path,
         )
+    timeline_duration = sum(
+        ((edit.get("trim_end_seconds") or 0) - edit["trim_start_seconds"]) / edit["playback_rate"]
+        for edit in normalized_edits.values()
+    )
+    if timeline_duration <= 0 or timeline_duration > 600 or len(clips) > 100:
+        raise HTTPException(400, "Keep this reel between 0.1 seconds and 10 minutes, with at most 100 clips.")
+    if job is None:
+        return await render_jobs.enqueue(get_supabase(), doc, body.dict())
+
+    async def progress(value: int, phase: str):
+        await render_jobs.report(get_supabase(), job, value, phase)
 
     started = time.monotonic()
     render_segments: List[tuple] = []
@@ -2444,6 +2584,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
             temp = Path(temp_dir)
             local_clips: List[Path] = []
             source_clips: Dict[int, Path] = {}
+            source_bytes = 0
             for index, (clip, segment_start, segment_end) in enumerate(render_segments):
                 shot_index = int(clip.get("shot_index", -1))
                 source_clip = source_clips.get(shot_index)
@@ -2452,7 +2593,10 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
                     if not re.fullmatch(r"\.[a-z0-9]{1,8}", suffix):
                         suffix = ".mp4"
                     source_clip = temp / f"source-{index}{suffix}"
-                    source_clip.write_bytes(await download_media(clip["video_storage_path"]))
+                    await download_media_file(clip["video_storage_path"], source_clip)
+                    source_bytes += source_clip.stat().st_size
+                    if source_bytes > 2 * 1024 ** 3:
+                        raise HTTPException(400, "This reel has more than 2 GB of source clips. Shorten it before exporting.")
                     if not source_clip.stat().st_size:
                         raise RuntimeError("A saved video clip is empty")
                     source_clips[shot_index] = source_clip
@@ -2479,12 +2623,14 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
                     caption_edit.get("position_x", 50), caption_edit.get("position_y", 84),
                     caption_edit.get("size", "medium"), caption_edit.get("font", "sans"),
                     clip_edit.get("playback_rate", 1),
-                    requested_style if remux_after_normalizing else None,
+                    requested_style,
                     body.original_volume if remux_after_normalizing else 1.0,
                 )
                 if not local_clip.stat().st_size:
                     raise RuntimeError("A saved video clip could not be normalized")
                 local_clips.append(local_clip)
+                await progress(5 + round(65 * (index + 1) / len(render_segments)),
+                               f"Preparing clip {index + 1} of {len(render_segments)}")
 
             concat_file = temp / "clips.txt"
             concat_file.write_text("".join(f"file '{path.name}'\n" for path in local_clips))
@@ -2492,16 +2638,22 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
             local_soundtrack = None
             if soundtrack_path:
                 local_soundtrack = temp / "soundtrack"
-                local_soundtrack.write_bytes(await download_media(soundtrack_path))
+                await download_media_file(soundtrack_path, local_soundtrack, 30 * 1024 ** 2)
                 if not local_soundtrack.stat().st_size:
                     raise RuntimeError("The saved soundtrack is empty")
             local_voiceover = None
             if voiceover_path:
                 local_voiceover = temp / "voiceover"
-                local_voiceover.write_bytes(await download_media(voiceover_path))
+                await download_media_file(voiceover_path, local_voiceover, 30 * 1024 ** 2)
                 if not local_voiceover.stat().st_size:
                     raise RuntimeError("The saved voiceover is empty")
 
+            overlays = []
+            for index, item in enumerate(broll_items(doc)):
+                image = temp / f"broll-{index}.image"
+                await download_media_file(item["src"], image, 20 * 1024 ** 2)
+                overlays.append({**item, "file": image})
+            await progress(75, "Combining clips, text, and audio")
             if remux_after_normalizing:
                 try:
                     await asyncio.to_thread(_run_video_remux, concat_file, output_file)
@@ -2516,36 +2668,31 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
             else:
                 await asyncio.to_thread(
                     _run_video_render, concat_file, output_file, width, height,
-                    local_soundtrack, body.fps, requested_style, title_text, body.title_font,
+                    local_soundtrack, body.fps, "original", title_text, body.title_font,
                     body.title_position, body.title_color, body.title_size,
                     body.music_volume, body.original_volume, local_voiceover, body.voiceover_volume,
+                    body.title_animation, overlays,
                 )
-            rendered = output_file.read_bytes()
+            await progress(92, "Saving your finished video")
+            export_path = f"{expected_prefix}exports/{uuid.uuid4()}.mp4"
+            with output_file.open("rb") as rendered_file:
+                await get_supabase().storage.from_("project-media").upload(
+                    export_path, rendered_file, {"content-type": "video/mp4", "upsert": "false"},
+                )
+            rendered_size = output_file.stat().st_size
+            url = await signed_media_url(export_path, 3600)
     except HTTPException:
         raise
     except Exception as error:
         log.exception("video export failed")
-        raise HTTPException(502, f"Could not render this video: {error}")
-
-    export_path = f"{expected_prefix}exports/{uuid.uuid4()}.mp4"
-    try:
-        await get_supabase().storage.from_("project-media").upload(
-            export_path, rendered, {"content-type": "video/mp4", "upsert": "false"},
-        )
-        signed = await get_supabase().storage.from_("project-media").create_signed_url(export_path, 3600)
-        url = signed.get("signedURL") or signed.get("signedUrl")
-        if not url:
-            raise RuntimeError("Supabase did not return a download link")
-    except Exception as error:
-        log.exception("saving rendered video failed")
-        raise HTTPException(502, f"Could not save the rendered video: {error}")
+        if str(getattr(error, "status", "")) == "413" or "maximum allowed size" in str(error).lower():
+            raise HTTPException(400, "This export exceeds your storage limit. Choose 720p or shorten the reel, then retry.")
+        raise HTTPException(502, "Could not render this reel. Your clips are safe; the worker will retry.")
 
     duration = sum(
         (segment_end - segment_start) / normalized_edits.get(int(clip.get("shot_index", -1)), {}).get("playback_rate", 1)
         for clip, segment_start, segment_end in render_segments
     )
-    if requested_style == "fast_pace":
-        duration *= 0.8
     export = {
         "url": url,
         "storage_path": export_path,
@@ -2554,7 +2701,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
         "resolution": body.resolution,
         "fps": body.fps,
         "duration_seconds": round(duration, 1),
-        "size_mb": round(len(rendered) / (1024 * 1024), 1),
+        "size_mb": round(rendered_size / (1024 * 1024), 1),
         "summary": blurb,
         "editing_style": requested_style,
         "render_provider": "ffmpeg",
@@ -2583,14 +2730,7 @@ async def export_project(pid: str, body: ExportIn, user=Depends(current_user)):
         "exported_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    doc.update({"status": "exported", "export": export, "edit_settings": body.dict(), "export_url": url,
-                "thumbnail_url": thumb, "updated_at": datetime.now(timezone.utc).isoformat()})
-    await save_project(doc, user["id"])
-    if old_export_path and old_export_path != export_path:
-        try:
-            await get_supabase().storage.from_("project-media").remove([old_export_path])
-        except Exception:
-            log.warning("unable to remove old export %s", old_export_path)
+    # The worker commits the result with an atomic JSON merge so active edits survive.
     return export
 
 
@@ -2678,21 +2818,57 @@ app.add_middleware(
 )
 
 
+render_worker_supervisor: Optional[asyncio.Task] = None
+
+
+async def supervise_render_worker():
+    while True:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, str(ROOT_DIR / "render_worker.py"), cwd=str(ROOT_DIR),
+            start_new_session=True,
+        )
+        try:
+            code = await process.wait()
+            log.warning("Renderer exited with code %s; restarting in 5 seconds", code)
+        finally:
+            if process.returncode is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(process.wait(), 5)
+                except asyncio.TimeoutError:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    await process.wait()
+        await asyncio.sleep(5)
+
+
 @app.on_event("startup")
 async def _startup():
-    global supabase
+    global supabase, render_worker_supervisor
     if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
         log.warning("Supabase is not configured; authenticated routes will return 503")
         return
     supabase = await create_async_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+    if os.environ.get("RENDER_WORKER_AUTOSTART", "1") == "1":
+        render_worker_supervisor = asyncio.create_task(supervise_render_worker())
 
 
 @app.on_event("shutdown")
 async def _shutdown():
+    global render_worker_supervisor
+    if render_worker_supervisor:
+        render_worker_supervisor.cancel()
+        await asyncio.gather(render_worker_supervisor, return_exceptions=True)
+        render_worker_supervisor = None
     if supabase is not None:
         await supabase.auth.close()
         if supabase._postgrest is not None:
             await supabase._postgrest.aclose()
         if supabase._storage is not None:
-            await supabase._storage.aclose()
+            await supabase._storage.session.aclose()
         await supabase.realtime.close()

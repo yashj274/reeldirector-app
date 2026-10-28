@@ -256,6 +256,7 @@ class BackendTests(unittest.TestCase):
             server.SUPABASE_SECRET_KEY = "not-a-real-key"
             await server._startup()
             self.assertIsNotNone(server.supabase)
+            self.assertIsNotNone(server.get_supabase().storage)
             await server._shutdown()
             server.supabase = None
 
