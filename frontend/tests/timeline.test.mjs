@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { locateTimelinePosition, splitTimelineRange, timelineDuration } from '../src/timeline.ts';
+import { clipWindow, locateTimelinePosition, splitTimelineRange, timelineDuration } from '../src/timeline.ts';
 
 test('split points create ordered, contiguous segments and ignore invalid cuts', () => {
   const segments = splitTimelineRange(2, 10, [7, 4, 4, 2, 10, Number.NaN, Infinity]);
@@ -33,4 +33,14 @@ test('playhead seek crosses split and clip boundaries at the next segment start'
   assert.deepEqual(locateTimelinePosition(segments, 10), { index: 2, sourceTime: 10 });
   assert.deepEqual(locateTimelinePosition(segments, 99), { index: 2, sourceTime: 12 });
   assert.deepEqual(locateTimelinePosition(segments, -3), { index: 0, sourceTime: 0 });
+});
+
+
+test('preview and export clamp estimated recording time to actual video duration', () => {
+  const clip = { duration_seconds: 3.418 };
+  assert.deepEqual(clipWindow(clip, 0, { trim_start_seconds: 0, trim_end_seconds: 3.418 }, { 0: 3 }),
+    { start: 0, end: 3, duration: 3 });
+  assert.deepEqual(clipWindow(clip, 0, { trim_start_seconds: 0.5, trim_end_seconds: 2 }, { 0: 3 }),
+    { start: 0.5, end: 2, duration: 1.5 });
+  assert.equal(clipWindow(clip, 0, { trim_start_seconds: 0, trim_end_seconds: 3.418 }, {}).end, 3.418);
 });

@@ -271,10 +271,10 @@ class BackendTests(unittest.TestCase):
             return {"storyboard": [{
                 "title": "Close-up", "description": "Frame the subject closely.",
                 "camera_movement": "static", "shot_size": "close_up",
-                "direction": "Move closer slowly",
+                "direction": "Move slowly from the office entrance toward the desk, then stop.",
             }]}
 
-        async def unavailable_ai(*_args):
+        async def unavailable_ai(*_args, **_kwargs):
             raise RuntimeError("GEMINI_API_KEY is not configured")
 
         with patch.object(server, "fetch_project", fake_project), patch.object(server, "chat_once", unavailable_ai):
@@ -282,9 +282,17 @@ class BackendTests(unittest.TestCase):
                 server.DirectorInstructionIn(project_id="p", shot_index=0), user={"id": "u"},
             ))
 
-        self.assertEqual(result["instruction"], "Move closer slowly")
+        self.assertEqual(result["instruction"], "Move slowly from the office entrance toward the desk, then stop.")
+        self.assertFalse(result["personalized"])
         self.assertFalse(result["ready"])
         self.assertEqual(result["confidence"], 0)
+        fast_ai = AsyncMock(return_value='{"instruction":"Hold still","ready":true,"confidence":95}')
+        with patch.object(server, "fetch_project", fake_project), patch.object(server, "chat_once", fast_ai):
+            result = asyncio.run(server.director_instruct(
+                server.DirectorInstructionIn(project_id="p", shot_index=0), user={"id": "u"},
+            ))
+        self.assertTrue(result["personalized"])
+        self.assertEqual(fast_ai.await_args.kwargs["model"], server.GEMINI_SCAN_MODEL)
 
     def test_frame_review_marks_unavailable_without_fake_score(self):
         async def fake_project(*_args):

@@ -38,3 +38,10 @@ export function locateTimelinePosition(segments: TimelineSegment[], timelineTime
   }
   return null;
 }
+
+export function clipWindow(clip: { duration_seconds?: number } | undefined, shot: number, edit: { trim_start_seconds: number; trim_end_seconds: number }, sourceDurations: Record<number, number>) {
+  const sourceDuration = sourceDurations[shot] || Number(clip?.duration_seconds) || 5;
+  const start = Math.min(sourceDuration, Math.max(0, edit.trim_start_seconds));
+  const end = Math.max(start, Math.min(sourceDuration, edit.trim_end_seconds));
+  return { start, end, duration: end - start };
+}

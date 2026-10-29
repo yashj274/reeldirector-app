@@ -28,8 +28,8 @@ test('advancing skips filmed and skipped scenes but preserves later retakes', ()
 });
 
 test('advances when a loaded clip ends even if saved duration metadata is longer', () => {
-  assert.equal(shouldAdvanceOnEndEvent(false), false);
-  assert.equal(shouldAdvanceOnEndEvent(true), true);
+  assert.equal(shouldAdvanceOnEndEvent(false, 3, 4, 3), false);
+  assert.equal(shouldAdvanceOnEndEvent(true, 3, 4, 3), true);
 });
 
 test('does not count a stale outgoing timestamp as progress in the new clip', () => {
@@ -38,4 +38,10 @@ test('does not count a stale outgoing timestamp as progress in the new clip', ()
   assert.equal(isClipStartTime(2.5, 2.3, 3.4), true);
   assert.equal(isClipProgress(4.6, 0, 3.4), false);
   assert.equal(isClipProgress(1.2, 0, 3.4), true);
+});
+
+
+test('a delayed end event cannot stop an incoming clip that has just started', () => {
+  assert.equal(shouldAdvanceOnEndEvent(true, 0.15, 4.5, 4.5), false);
+  assert.equal(shouldAdvanceOnEndEvent(true, 4.5, 4.5, 4.5), true);
 });

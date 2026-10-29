@@ -1718,7 +1718,7 @@ Give the next short, scene-specific instruction. First choose the most relevant 
     try:
         images = [body.image_base64] if body.image_base64 else []
         raw = await chat_once(
-            DIRECTOR_SYSTEM, prompt, images, max_output_tokens=128,
+            DIRECTOR_SYSTEM, prompt, images, model=GEMINI_SCAN_MODEL, max_output_tokens=256,
             thinking_level="minimal", max_attempts=1, timeout=(4, 8),
         )
         data = extract_json(raw)
@@ -1727,7 +1727,7 @@ Give the next short, scene-specific instruction. First choose the most relevant 
         data["personalized"] = True
     except Exception as e:
         log.warning("director fail: %s", e)
-        data = {"instruction": shot["direction"][:40], "arrow_direction": "none",
+        data = {"instruction": " ".join(str(shot.get("instruction") or shot["direction"]).split()[:12]), "arrow_direction": "none",
                 "ready": False, "confidence": 0, "personalized": False}
     return data
 

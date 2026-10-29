@@ -10,6 +10,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import * as VideoThumbnails from 'expo-video-thumbnails';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system/legacy';
 
 import { api, DirectorGuidance } from '@/src/api';
@@ -120,7 +121,7 @@ function readVideoFrame(file: File): Promise<VideoFrame> {
     };
     video.onseeked = () => {
       try {
-        const scale = Math.min(1, 1280 / video.videoWidth);
+        const scale = Math.min(1, 512 / video.videoWidth);
         const canvas = document.createElement('canvas');
         canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
         canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
@@ -152,6 +153,9 @@ export default function DirectorCamera() {
   const recordingPromise = useRef<Promise<RecordedVideo | undefined> | null>(null);
   const recordingFrame = useRef<string | null>(null);
   const nativeFrameCapture = useRef<Promise<string> | null>(null);
+  const nativeModeRef = useRef<'picture' | 'video'>('picture');
+  const nativeModeReady = useRef<(() => void) | null>(null);
+  const [nativeMode, setNativeMode] = useState<'picture' | 'video'>('picture');
   const webVideoRef = useRef<HTMLVideoElement | null>(null);
   const webStreamRef = useRef<MediaStream | null>(null);
   const webAudioStreamRef = useRef<MediaStream | null>(null);
@@ -246,6 +250,7 @@ export default function DirectorCamera() {
 
   const onNativeCameraReady = useCallback(async () => {
     setCameraReady(true);
+    nativeModeReady.current?.();
     if (Platform.OS !== 'ios' || nativeLensFacing.current === facing) return;
     nativeLensFacing.current = facing;
     try {
@@ -378,13 +383,31 @@ export default function DirectorCamera() {
     setSelectedZoomLabel(option.label);
   };
 
+  const prepareVideoCamera = () => {
+    if (nativeModeRef.current === 'video' && cameraReady) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        nativeModeReady.current = null;
+        reject(new Error('The camera could not switch to video. Please try again.'));
+      }, 10_000);
+      nativeModeReady.current = () => {
+        clearTimeout(timer);
+        nativeModeReady.current = null;
+        resolve();
+      };
+      setCameraReady(false);
+      nativeModeRef.current = 'video';
+      setNativeMode('video');
+    });
+  };
+
   const captureFrame = useCallback(async () => {
     if (Platform.OS === 'web') {
       const video = webVideoRef.current;
       if (!video || !video.videoWidth || !video.videoHeight) {
         throw new Error('Wait for the camera preview to become ready, then try again.');
       }
-      const scale = Math.min(1, 1280 / video.videoWidth);
+      const scale = Math.min(1, 512 / video.videoWidth);
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
       canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
@@ -396,9 +419,13 @@ export default function DirectorCamera() {
     }
     if (nativeFrameCapture.current) return nativeFrameCapture.current;
     const capture = (async () => {
-      const photo = await cameraRef.current?.takePictureAsync({ base64: true, quality: 0.4, skipProcessing: true });
-      if (!photo?.base64) throw new Error('Could not capture a frame from the camera.');
-      return photo.base64;
+      const photo = await cameraRef.current?.takePictureAsync({ quality: 0.4, skipProcessing: true });
+      if (!photo?.uri) throw new Error('Could not capture a frame from the camera.');
+      const frame = await manipulateAsync(photo.uri, [{ resize: { width: 512 } }], {
+        compress: 0.6, format: SaveFormat.JPEG, base64: true,
+      });
+      if (!frame.base64) throw new Error('Could not prepare the camera frame.');
+      return frame.base64;
     })();
     nativeFrameCapture.current = capture;
     try {
@@ -422,7 +449,7 @@ export default function DirectorCamera() {
       }
     } catch (e: any) {
       if (shotIndexRef.current === shotIndex) {
-        setInstruction({ command: 'hold_steady', message: shotObj.direction?.slice(0, 40) || 'Hold steady', confidence: 0, ready: false, personalized: false });
+        setInstruction({ command: 'hold_steady', message: compactInstruction(shotObj, 'Hold steady'), confidence: 0, ready: false, personalized: false });
         if (e.message?.includes('not configured') || e.message?.includes('not connected')) setCameraError(e.message);
       }
     } finally {
@@ -587,8 +614,8 @@ export default function DirectorCamera() {
         return;
       }
       if (!cameraRef.current) throw new Error('Camera is not ready. Wait for the preview, then try again.');
-      // This camera is configured for video; a still capture can fail on some
-      // Android devices and must never prevent video recording from starting.
+      if (nativeFrameCapture.current) await nativeFrameCapture.current.catch(() => {});
+      await prepareVideoCamera();
       recordingFrame.current = null;
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
       const recordingOptions = Platform.OS === 'ios'
@@ -628,11 +655,11 @@ export default function DirectorCamera() {
       } else {
         cameraRef.current?.stopRecording();
       }
+      const dur = Math.max(0.1, (Date.now() - clipStart.current) / 1000);
       const recorded = await recordingPromise.current;
       if (!recorded?.uri && !recorded?.blob) throw new Error('The camera did not return a video file.');
       captured = true;
       logBeta('recording', 'completed');
-      const dur = Math.max(0.1, (Date.now() - clipStart.current) / 1000);
       let frameBase64 = Platform.OS === 'web' ? await captureFrame() : recordingFrame.current;
       if (!frameBase64 && Platform.OS !== 'web' && recorded.uri) {
         try {
@@ -677,6 +704,11 @@ export default function DirectorCamera() {
       webAudioStreamRef.current = null;
       stoppingRecording.current = false;
       setRecording(false);
+      if (Platform.OS !== 'web') {
+        setCameraReady(false);
+        nativeModeRef.current = 'picture';
+        setNativeMode('picture');
+      }
       setAnalyzing(false);
     }
   };
@@ -807,7 +839,7 @@ export default function DirectorCamera() {
         : <CameraView
           ref={cameraRef}
           style={StyleSheet.absoluteFill}
-          mode="video"
+          mode={nativeMode}
           mute={false}
           videoQuality="1080p"
           videoStabilizationMode={mode === 'cinematic' ? 'cinematic' : 'standard'}
@@ -865,14 +897,14 @@ export default function DirectorCamera() {
             <BlurView tint="dark" intensity={50} style={StyleSheet.absoluteFill} />
             {directionBusy ? <ActivityIndicator color={theme.color.brand} /> : (
               <Ionicons
-                name={instruction?.ready ? 'checkmark-circle' : arrowIcon(instruction?.command || movementArrow(shotObj?.camera_movement)) as any}
+                name={instruction?.ready ? 'checkmark-circle' : arrowIcon((instruction?.personalized === false ? undefined : instruction?.command) || movementArrow(shotObj?.camera_movement)) as any}
                 size={26}
                 color={instruction?.ready ? theme.color.success : theme.color.brand}
               />
             )}
             <View style={styles.instrCopy}>
               <Text style={styles.instrLabel}>{instruction?.personalized === false ? t('shot_plan') : t('live_director')}</Text>
-              <Text style={styles.instrText} numberOfLines={2}>
+              <Text style={styles.instrText} numberOfLines={3} adjustsFontSizeToFit minimumFontScale={0.8}>
                 {instruction?.message || shotInstruction || (directionBusy ? t('director_checking') : '')}
               </Text>
             </View>
@@ -1046,7 +1078,7 @@ export default function DirectorCamera() {
                   <View style={[styles.recBtnInner, recording && styles.recBtnInnerActive]} />
                 </Pressable>
                 <View style={styles.progressBar}>
-                  <View style={[styles.progressBarFill, { width: `${Math.min(100, (recSeconds / targetDur) * 100)}%` }]} />
+                  <View style={[styles.progressBarFill, { width: `${recording ? Math.min(100, (recSeconds / targetDur) * 100) : 0}%` }]} />
                 </View>
               </>
             )}
@@ -1103,7 +1135,7 @@ const styles = StyleSheet.create({
   shotPill: { flex: 1, height: 52, borderRadius: theme.radius.md, overflow: 'hidden', paddingHorizontal: 14, justifyContent: 'center' },
   shotPillLabel: { color: theme.color.brand, fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
   shotPillTitle: { color: '#fff', fontSize: 14, fontWeight: '700', marginTop: 2 },
-  instrWrap: { marginHorizontal: 16, marginTop: 14, minHeight: 62, borderRadius: theme.radius.md, overflow: 'hidden', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, gap: 12 },
+  instrWrap: { marginHorizontal: 16, marginTop: 14, minHeight: 62, paddingVertical: 10, borderRadius: theme.radius.md, overflow: 'hidden', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, gap: 12 },
   instrCopy: { flex: 1, gap: 2 },
   instrLabel: { color: theme.color.brand, fontSize: 9, fontWeight: '900', letterSpacing: 1.1 },
   instrText: { color: '#fff', fontSize: 15, lineHeight: 19, fontWeight: '700' },
@@ -1138,7 +1170,7 @@ const styles = StyleSheet.create({
   ghostText: { color: '#fff', fontWeight: '700' },
   primary: { flex: 1.4, height: 48, borderRadius: theme.radius.md, backgroundColor: theme.color.brand, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   primaryText: { color: '#fff', fontWeight: '700' },
-  sideCol: { position: 'absolute', right: 12, top: 120, gap: 10, zIndex: 4 },
+  sideCol: { position: 'absolute', right: 12, top: 176, gap: 10, zIndex: 4 },
   iconChip: { width: 40, height: 40, borderRadius: 20, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
   iconChipOn: { borderWidth: 1, borderColor: theme.color.brand },
   brightnessPopover: {

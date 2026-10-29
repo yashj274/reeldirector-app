@@ -17,7 +17,7 @@ import { useFonts } from 'expo-font';
 import { api } from '@/src/api';
 import { isClipProgress, shouldAdvanceOnEndEvent } from '@/src/reelPlayback';
 import { syncClipEndsToBeats } from '@/src/beatSync';
-import { locateTimelinePosition, splitTimelineRange } from '@/src/timeline';
+import { clipWindow, locateTimelinePosition, splitTimelineRange } from '@/src/timeline';
 import { theme } from '@/src/theme';
 import { EDITOR_FONT_ASSETS } from '@/src/editor/fontAssets';
 import { expoFontFamily } from '@/src/editor/fonts';
@@ -205,12 +205,6 @@ function clock(value: number) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function clipWindow(clip: any, shot: number, edit: ClipEdit, sourceDurations: Record<number, number>) {
-  const sourceDuration = sourceDurations[shot] || Number(clip?.duration_seconds) || 5;
-  const start = Math.min(sourceDuration, Math.max(0, edit.trim_start_seconds));
-  const end = Math.max(start, Math.min(sourceDuration, edit.trim_end_seconds));
-  return { start, end, duration: end - start };
-}
 
 export default function Export() {
   const { id, clip: clipParam } = useLocalSearchParams<{ id: string; clip?: string }>();
@@ -410,7 +404,6 @@ export default function Export() {
   captionValuesRef.current = activeCaption;
   const activeFilter = activeEdit?.filter_preset || 'original';
   const brollItems: any[] = project?.edit_json?.tracks?.find((track: any) => track.kind === 'overlay')?.items || [];
-  const activeBroll = brollItems.find((item) => timelinePosition >= item.start && timelinePosition < item.start + item.duration);
   const nextSegment = activeSegmentIndex >= 0 ? orderedSegments[activeSegmentIndex + 1] : undefined;
   const nextIncludedClip = nextSegment?.clip || null;
   const nextIncludedShot = nextSegment?.shot ?? null;
@@ -421,6 +414,7 @@ export default function Export() {
     + (activeSegment && activeEdit
       ? Math.min(segmentDuration(activeSegment), Math.max(0, currentTime - activeTrimStart) / activeEdit.playback_rate)
       : 0);
+  const activeBroll = brollItems.find((item) => timelinePosition >= item.start && timelinePosition < item.start + item.duration);
   currentActiveShot.current = activeShot;
   currentActiveUri.current = activeVideoUri;
   currentTrimStart.current = activeTrimStart;
@@ -610,6 +604,7 @@ export default function Export() {
       if (playbackFinished.current) return;
       if (loadedPlayerShot.current !== currentActiveShot.current) return;
       const clipEnd = currentClipEnd.current;
+      if (Math.abs(time - player.currentTime) > 0.5) return;
       // A native player can send the previous source's last timestamps just
       // after a source replacement. Ignore it unless it belongs to the active player.
       if (!clipStarted.current) {
@@ -666,9 +661,9 @@ export default function Export() {
       if (loadedPlayerShot.current !== currentActiveShot.current) return;
       // A playToEnd from the previous source can arrive after the next clip has
       // loaded. Ignore it until the current clip itself has reached its end.
-      // Trust this loaded player's end event even when saved duration metadata
-      // is longer than the actual file; source/player guards above reject stale ends.
-      if (!shouldAdvanceOnEndEvent(clipHasPlayed.current)) return;
+      // The native duration handles overestimated recording metadata; position
+      // rejects delayed end events from a previous source on the same player.
+      if (!shouldAdvanceOnEndEvent(clipHasPlayed.current, player.currentTime, currentClipEnd.current, player.duration)) return;
       advanceRef.current(player);
     });
     // A short clip can finish before React attaches listeners to its new player.
@@ -962,9 +957,15 @@ export default function Export() {
     setNotice('');
     setRenderStage('Applying your edits…');
     try {
-      await api.saveEditSettings(id, settings as any);
+      const exportSettings = { ...settings, clip_edits: settings.clip_edits.map((edit) => {
+        const clip = orderedClips.find((item: any, index: number) => shotIndex(item, index) === edit.shot_index);
+        const { start, end } = clipWindow(clip, edit.shot_index, edit, sourceDurations);
+        return { ...edit, trim_start_seconds: start, trim_end_seconds: end };
+      }) };
+      await api.saveEditSettings(id, exportSettings as any);
+      setSettings(exportSettings);
       setDirty(false);
-      await api.export(id, settings as any, (status) => setRenderStage(status));
+      await api.export(id, exportSettings as any, (status) => setRenderStage(status));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       router.replace({ pathname: '/project/[id]/final', params: { id } });
     } catch (error: any) {
