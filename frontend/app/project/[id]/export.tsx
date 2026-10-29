@@ -391,7 +391,7 @@ export default function Export() {
   const showTitleOverlay = !!settings.title_text && activeShot === openingShot
     && (currentTime - activeWindow.start) / (activeEdit?.playback_rate || 1) < 3.5;
   const activeSegmentIndex = orderedSegments.findIndex((segment: any) => segment.shot === activeShot
-    && currentTime >= segment.start - 0.15 && currentTime < segment.end - 0.001);
+    && currentTime >= segment.start - 0.15 && currentTime <= segment.end);
   const activeSegment = orderedSegments[activeSegmentIndex] || orderedSegments.find((segment: any) => segment.shot === activeShot);
   const activeClipEnd = activeSegment?.end ?? activeWindow.end;
   const activeTrimStart = activeSegment?.start ?? activeWindow.start;
