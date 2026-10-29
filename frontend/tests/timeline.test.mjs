@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clipWindow, locateTimelinePosition, splitTimelineRange, timelineDuration } from '../src/timeline.ts';
+import { captionWindow, clipWindow, locateTimelinePosition, splitTimelineRange, timelineDuration } from '../src/timeline.ts';
 
 test('split points create ordered, contiguous segments and ignore invalid cuts', () => {
   const segments = splitTimelineRange(2, 10, [7, 4, 4, 2, 10, Number.NaN, Infinity]);
@@ -43,4 +43,13 @@ test('preview and export clamp estimated recording time to actual video duration
   assert.deepEqual(clipWindow(clip, 0, { trim_start_seconds: 0.5, trim_end_seconds: 2 }, { 0: 3 }),
     { start: 0.5, end: 2, duration: 1.5 });
   assert.equal(clipWindow(clip, 0, { trim_start_seconds: 0, trim_end_seconds: 3.418 }, {}).end, 3.418);
+});
+
+test('captions still fit when measured video is shorter than recording metadata', () => {
+  assert.deepEqual(captionWindow({ start_seconds: 0, end_seconds: 3.418 }, 2.799),
+    { start_seconds: 0, end_seconds: 2.799 });
+  assert.deepEqual(captionWindow({ start_seconds: 3, end_seconds: 3.418 }, 2),
+    { start_seconds: 1.85, end_seconds: 2 });
+  assert.deepEqual(captionWindow({ start_seconds: 0.5, end_seconds: 1.5 }, 2),
+    { start_seconds: 0.5, end_seconds: 1.5 });
 });

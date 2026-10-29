@@ -17,7 +17,7 @@ import { useFonts } from 'expo-font';
 import { api } from '@/src/api';
 import { isClipProgress, shouldAdvanceOnEndEvent } from '@/src/reelPlayback';
 import { syncClipEndsToBeats } from '@/src/beatSync';
-import { clipWindow, locateTimelinePosition, splitTimelineRange } from '@/src/timeline';
+import { captionWindow, clipWindow, locateTimelinePosition, splitTimelineRange } from '@/src/timeline';
 import { theme } from '@/src/theme';
 import { EDITOR_FONT_ASSETS } from '@/src/editor/fontAssets';
 import { expoFontFamily } from '@/src/editor/fonts';
@@ -481,6 +481,8 @@ export default function Export() {
     if (shot < 0 || !currentActiveUri.current || targetPlayer.status !== 'readyToPlay') return;
     if (preparedPlayer.current?.player === targetPlayer && preparedPlayer.current?.shot === shot) return;
     preparedPlayer.current = { player: targetPlayer, shot };
+    const duration = targetPlayer.duration;
+    if (duration > 0) setSourceDurations((current) => current[shot] === duration ? current : { ...current, [shot]: duration });
     const start = desiredShot.current === shot ? desiredTime.current : currentTrimStart.current;
     const safeStart = Math.min(start, Math.max(0, (targetPlayer.duration || start + 0.05) - 0.05));
     targetPlayer.currentTime = safeStart;
@@ -664,7 +666,7 @@ export default function Export() {
       // The native duration handles overestimated recording metadata; position
       // rejects delayed end events from a previous source on the same player.
       if (!shouldAdvanceOnEndEvent(clipHasPlayed.current, player.currentTime, currentClipEnd.current, player.duration)) return;
-      advanceRef.current(player);
+      if (!advanceRef.current(player)) setCurrentTime(currentClipEnd.current);
     });
     // A short clip can finish before React attaches listeners to its new player.
     // Check readiness after subscribing so the next segment still starts.
@@ -708,8 +710,7 @@ export default function Export() {
         ? current.caption_edits.map((caption) => {
           if (caption.shot_index !== shot) return caption;
           const available = Math.max(0.25, (clipEdit.trim_end_seconds - clipEdit.trim_start_seconds) / clipEdit.playback_rate);
-          const start = Math.max(0, Math.min(available - 0.15, caption.start_seconds));
-          return { ...caption, start_seconds: start, end_seconds: Math.max(start + 0.15, Math.min(available, caption.end_seconds)) };
+          return { ...caption, ...captionWindow(caption, available) };
         })
         : current.caption_edits;
       return {
@@ -957,11 +958,18 @@ export default function Export() {
     setNotice('');
     setRenderStage('Applying your edits…');
     try {
-      const exportSettings = { ...settings, clip_edits: settings.clip_edits.map((edit) => {
+      const clip_edits = settings.clip_edits.map((edit) => {
         const clip = orderedClips.find((item: any, index: number) => shotIndex(item, index) === edit.shot_index);
         const { start, end } = clipWindow(clip, edit.shot_index, edit, sourceDurations);
         return { ...edit, trim_start_seconds: start, trim_end_seconds: end };
-      }) };
+      });
+      const caption_edits = settings.caption_edits.map((caption) => {
+        const edit = clip_edits.find((item) => item.shot_index === caption.shot_index);
+        if (!edit) return caption;
+        const duration = (edit.trim_end_seconds - edit.trim_start_seconds) / edit.playback_rate;
+        return { ...caption, ...captionWindow(caption, duration) };
+      });
+      const exportSettings = { ...settings, clip_edits, caption_edits };
       await api.saveEditSettings(id, exportSettings as any);
       setSettings(exportSettings);
       setDirty(false);
@@ -994,8 +1002,7 @@ export default function Export() {
           const edit = clip_edits.find((item) => item.shot_index === caption.shot_index);
           if (!edit) return caption;
           const available = Math.max(0.25, (edit.trim_end_seconds - edit.trim_start_seconds) / edit.playback_rate);
-          const start = Math.max(0, Math.min(available - 0.15, caption.start_seconds));
-          return { ...caption, start_seconds: start, end_seconds: Math.max(start + 0.15, Math.min(available, caption.end_seconds)) };
+          return { ...caption, ...captionWindow(caption, available) };
         });
         return {
           ...current,
@@ -1300,6 +1307,7 @@ export default function Export() {
           </Pressable>
         </View>
       </SafeAreaView>
+      {!!renderError ? <Text style={styles.inlineError} accessibilityRole="alert">{renderError}</Text> : null}
 
       <ScrollView ref={editorScrollRef} style={styles.editorScroll} contentContainerStyle={styles.editorBody} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
         <View style={[styles.preview, { height: previewHeight }]}>
@@ -1518,7 +1526,7 @@ export default function Export() {
           <Text style={styles.timelineHint}>Drag the white line to scrub · Tap a caption segment to set its timing</Text>
         </View>
 
-        {(!!renderError || !!addClipError) ? <Text style={styles.inlineError} accessibilityRole="alert">{renderError || addClipError}</Text> : null}
+        {!!addClipError ? <Text style={styles.inlineError} accessibilityRole="alert">{addClipError}</Text> : null}
         {!!notice && !dirty ? <Text style={styles.notice}>{notice}</Text> : null}
         {!!project && orderedClips.length > 0 ? <Text style={styles.summary}>{includedCount} clips · {estimatedDuration.toFixed(1)} sec · {settings.resolution} export</Text> : null}
       </ScrollView>

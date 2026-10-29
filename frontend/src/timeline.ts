@@ -45,3 +45,8 @@ export function clipWindow(clip: { duration_seconds?: number } | undefined, shot
   const end = Math.max(start, Math.min(sourceDuration, edit.trim_end_seconds));
   return { start, end, duration: end - start };
 }
+
+export function captionWindow(caption: { start_seconds: number; end_seconds: number }, duration: number) {
+  const start = Math.max(0, Math.min(Math.max(0, duration - 0.15), caption.start_seconds));
+  return { start_seconds: start, end_seconds: Math.min(duration, Math.max(start + 0.15, caption.end_seconds)) };
+}
